@@ -23,7 +23,8 @@ COPY src ./src
 COPY pyproject.toml README.md sample.env ./
 
 ENV PATH="/app/.venv/bin:${PATH}" \
-    PORT=3373
+    PORT=3373 \
+    PYTHONPATH="/app/src"
 
 EXPOSE 3373
 
