@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     device: str = "auto"
     compute_type: str = "int8"
+    log_file: str = "logs/whisper.log"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

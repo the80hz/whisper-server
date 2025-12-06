@@ -34,6 +34,7 @@ Environment variables (see `sample.env`):
 | `PORT` | `3373` | Port exposed by uvicorn and Docker image. |
 | `WHISPER_MODEL` | `large-v3-turbo` | Model name accepted by faster-whisper. |
 | `LOG_LEVEL` | `INFO` | Root logging verbosity. |
+| `LOG_FILE` | `logs/whisper.log` | Path for persistent application logs (directory created automatically). |
 | `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
 
