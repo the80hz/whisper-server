@@ -77,6 +77,14 @@ model = WhisperModel(
 )
 
 
+def _runtime_device() -> str:
+    """Return the device actually chosen by faster-whisper."""
+
+    impl = getattr(model, "model", None)
+    actual = getattr(impl, "device", None) or getattr(model, "device", None)
+    return str(actual) if actual else settings.device
+
+
 @app.get("/health")
 async def health() -> dict[str, float | str]:
     now = time.time()
@@ -91,7 +99,7 @@ async def health() -> dict[str, float | str]:
     return {
         "status": status,
         "model": settings.whisper_model,
-        "device": settings.device,
+        "device": _runtime_device(),
         "compute_type": settings.compute_type,
         "log_level": settings.log_level.upper(),
         "uptime_seconds": round(now - app_started_at, 2),
