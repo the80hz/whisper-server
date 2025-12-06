@@ -10,6 +10,7 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "faster-whisper>=1.0.0",
     "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.6"
 ]
 
 [project.urls]
