@@ -86,6 +86,17 @@ def _runtime_device() -> str:
     return str(actual) if actual else settings.device
 
 
+def _format_uptime(seconds: float) -> str:
+    days, rem = divmod(seconds, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if int(days):
+        parts.append(f"{int(days)}d")
+    parts.append(f"{int(hours):02}:{int(minutes):02}:{secs:05.2f}")
+    return " ".join(parts)
+
+
 @app.get("/health")
 async def health() -> dict[str, float | str]:
     now = time.time()
@@ -97,13 +108,14 @@ async def health() -> dict[str, float | str]:
         probe = {"probe_error": str(exc)}
         status = "error"
 
+    uptime_seconds = now - app_started_at
     return {
         "status": status,
         "model": settings.whisper_model,
         "device": _runtime_device(),
         "compute_type": settings.compute_type,
         "log_level": settings.log_level.upper(),
-        "uptime_seconds": round(now - app_started_at, 2),
+        "uptime": _format_uptime(uptime_seconds),
         "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         **probe,
     }
