@@ -9,6 +9,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -103,7 +104,7 @@ async def health() -> dict[str, float | str]:
         "compute_type": settings.compute_type,
         "log_level": settings.log_level.upper(),
         "uptime_seconds": round(now - app_started_at, 2),
-        "timestamp": now,
+        "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         **probe,
     }
 
