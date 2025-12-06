@@ -15,8 +15,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/the80hz/whisper-server"
 
-[tool.uv]
-dev-dependencies = [
-    "ruff>=0.6.5",
-    "pytest>=8.3.0",
+[dependency-groups]
+dev = [
+  "ruff>=0.8.2",
+  "pytest>=8.3.4"
 ]
