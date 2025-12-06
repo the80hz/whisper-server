@@ -4,6 +4,8 @@ services:
       context: .
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs
     ports:
       - "${PORT:-3373}:${PORT:-3373}"
     restart: unless-stopped
