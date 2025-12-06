@@ -25,7 +25,7 @@ COPY pyproject.toml README.md sample.env ./
 ENV PATH="/app/.venv/bin:${PATH}" \
     PORT=3373 \
     PYTHONPATH="/app/src" \
-    LD_LIBRARY_PATH="/app/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
+    LD_LIBRARY_PATH="/app/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:${LD_LIBRARY_PATH}"
 
 EXPOSE 3373
 
