@@ -1,0 +1,22 @@
+[project]
+name = "whisper-server"
+version = "0.1.0"
+description = "FastAPI wrapper around faster-whisper with Docker and uv tooling"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "faster-whisper>=1.0.0",
+    "pydantic-settings>=2.6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-handle/whisper-server"
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.6.5",
+    "pytest>=8.3.0",
+]

@@ -1,0 +1,17 @@
+services:
+  whisper-api:
+    build:
+      context: .
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-3373}:${PORT:-3373}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: all
+    environment:
+      PORT: "${PORT:-3373}"
