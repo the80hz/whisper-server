@@ -3,6 +3,7 @@
 FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for lightweight, production-friendly speech-to-text workloads. The project uses [uv](https://docs.astral.sh/uv/) for dependency management and targets Python 3.13.
 
 ## Features
+
 - Single `/transcribe` endpoint accepting audio uploads via `multipart/form-data`.
 - One-time in-memory loading of the configured Whisper model for low-latency responses.
 - Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
@@ -10,14 +11,18 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 - Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
 
 ## Quick Start
+
 1. [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure Python 3.13 is available.
 2. Copy the example environment file: `cp sample.env .env` and tweak values as needed.
 3. Install dependencies with `uv sync`.
 4. Launch the API:
+
    ```bash
    uv run uvicorn whisper_server.server:app --host 0.0.0.0 --port ${PORT:-3373}
    ```
+
 5. Transcribe audio via curl:
+
    ```bash
    curl -X POST "http://localhost:3373/transcribe" \
      -H "accept: application/json" \
@@ -28,6 +33,7 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 Alternatively, use the Makefile helpers: `make setup` and `make run`.
 
 ## Configuration
+
 Environment variables (see `sample.env`):
 
 | Variable | Default | Description |
@@ -43,6 +49,7 @@ Environment variables (see `sample.env`):
 | `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
 
 ## `/transcribe` Arguments
+
 The endpoint supports query parameters in addition to file upload:
 
 - `task`: `transcribe` (default) or `translate`
@@ -52,20 +59,31 @@ The endpoint supports query parameters in addition to file upload:
 - `max_file_size_mb`: override max file size for a single call
 
 ## Docker & Compose
+
 Build and run with Docker:
+
 ```bash
 docker build -t whisper-server .
 docker run --env-file .env -p ${PORT:-3373}:${PORT:-3373} whisper-server
 ```
 
 Or use Compose:
+
 ```bash
 docker compose up --build
 ```
+
 The compose service loads `.env`, maps the configured port, and can be extended with volumes for cached models if desired.
 
-## Project Layout
+For NVIDIA GPU hosts (Linux), use the GPU override:
+
+```bash
+docker compose -f compose.yml -f compose.gpu.yml up --build
 ```
+
+## Project Layout
+
+```text
 .
 ├── compose.yml
 ├── Dockerfile
@@ -81,6 +99,7 @@ The compose service loads `.env`, maps the configured port, and can be extended 
 ```
 
 ## Development Notes
+
 - Linting: `uv run ruff check .`
 - Tests: `uv run pytest`
 - Use `uv lock` to generate a lockfile if you need a deterministic dependency snapshot.

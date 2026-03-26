@@ -1,0 +1,8 @@
+services:
+  whisper-api:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: all
