@@ -5,7 +5,7 @@ APP = whisper_server.server:app
 .PHONY: setup run dev lint format test docker-build docker-run compose
 
 setup:
-	$(UV) sync
+	$(UV) sync --python 3.13
 
 run:
 	$(UV) run uvicorn $(APP) --host 0.0.0.0 --port $(PORT)

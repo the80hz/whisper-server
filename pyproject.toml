@@ -11,8 +11,8 @@ dependencies = [
     "faster-whisper>=1.0.0",
     "pydantic-settings>=2.6.0",
     "python-multipart>=0.0.6",
-    "nvidia-cudnn-cu12>=9.1.0",
-    "nvidia-cublas-cu12>=12.4.0",
+    "nvidia-cudnn-cu12>=9.1.0; sys_platform == 'linux'",
+    "nvidia-cublas-cu12>=12.4.0; sys_platform == 'linux'",
 ]
 
 [project.urls]
