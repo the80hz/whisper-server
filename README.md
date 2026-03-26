@@ -5,6 +5,7 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 ## Features
 - Single `/transcribe` endpoint accepting audio uploads via `multipart/form-data`.
 - One-time in-memory loading of the configured Whisper model for low-latency responses.
+- Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
 - Configurable via environment variables (`sample.env` provided).
 - Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
 
@@ -37,6 +38,18 @@ Environment variables (see `sample.env`):
 | `LOG_FILE` | `logs/whisper.log` | Path for persistent application logs (directory created automatically). |
 | `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
+| `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
+| `DEFAULT_TIMEOUT_SECONDS` | `180` | Per-request timeout when `timeout_seconds` is not provided. |
+| `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
+
+## `/transcribe` Arguments
+The endpoint supports query parameters in addition to file upload:
+
+- `task`: `transcribe` (default) or `translate`
+- `language`: language code hint (for example `ru`, `en`)
+- `word_timestamps`: `true/false` to include per-word timestamps
+- `timeout_seconds`: override request timeout for a single call
+- `max_file_size_mb`: override max file size for a single call
 
 ## Docker & Compose
 Build and run with Docker:
