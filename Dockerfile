@@ -29,4 +29,4 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 
 EXPOSE 3373
 
-CMD ["uvicorn", "whisper_server.server:app", "--host", "0.0.0.0", "--port", "3373"]
+CMD ["sh", "-c", "exec uvicorn whisper_server.server:app --host 0.0.0.0 --port ${PORT:-3373}"]

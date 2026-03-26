@@ -219,7 +219,6 @@ async def transcribe(
     language: str | None = Query(default=None),
     word_timestamps: bool = Query(default=False),
     timeout_seconds: float | None = Query(default=None, gt=0),
-    max_file_size_mb: float | None = Query(default=None, gt=0),
 ) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must include a filename")
@@ -227,7 +226,7 @@ async def transcribe(
     logger.info("Received file %s", file.filename)
 
     suffix = Path(file.filename).suffix or ".tmp"
-    max_bytes = int((max_file_size_mb or settings.max_upload_mb) * 1024 * 1024)
+    max_bytes = int(settings.max_upload_mb * 1024 * 1024)
     total_bytes = 0
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:

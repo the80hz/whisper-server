@@ -56,7 +56,6 @@ The endpoint supports query parameters in addition to file upload:
 - `language`: language code hint (for example `ru`, `en`)
 - `word_timestamps`: `true/false` to include per-word timestamps
 - `timeout_seconds`: override request timeout for a single call
-- `max_file_size_mb`: override max file size for a single call
 
 ## Docker & Compose
 
