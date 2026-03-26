@@ -6,7 +6,7 @@ services:
       - .env
     volumes:
       - ./logs:/app/logs
-      - model-cache:/root/.cache/huggingface
+      - ./model-cache:/root/.cache/huggingface
     ports:
       - "${PORT:-3373}:${PORT:-3373}"
     restart: unless-stopped
