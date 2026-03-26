@@ -1,5 +1,6 @@
 services:
   whisper-api:
+    image: the80hz/whisper-api:latest
     build:
       context: .
     env_file:
