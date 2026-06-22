@@ -77,6 +77,8 @@ def _run_probe() -> dict[str, float | str | int]:
     """Run a minimal transcription to verify the model end-to-end."""
 
     start = time.monotonic()
+    # Ensure model is loaded for the probe
+    _load_model_sync()
     segments_iter, info = model.transcribe(str(HEALTH_CLIP_PATH), task="transcribe", temperature=0.0)
     text = "".join(segment.text for segment in segments_iter)
     elapsed = time.monotonic() - start
@@ -88,6 +90,9 @@ def _run_probe() -> dict[str, float | str | int]:
 
 
 def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
+    # Ensure model is loaded when running in the threadpool
+    _load_model_sync()
+    _update_model_last_used_sync()
     segments_iter, info = model.transcribe(
         job.audio_path,
         task=job.task,
@@ -149,6 +154,16 @@ async def _transcription_worker() -> None:
 async def _startup_worker() -> None:
     global worker_task
     worker_task = asyncio.create_task(_transcription_worker())
+    # Load model at startup to preserve previous eager-loading behaviour
+    try:
+        await run_in_threadpool(_load_model_sync)
+    except Exception:
+        logger.exception("Failed to load Whisper model at startup")
+
+    # Start idle watcher if enabled
+    global model_watcher_task
+    if settings.model_unload_seconds and settings.model_unload_seconds > 0:
+        model_watcher_task = asyncio.create_task(_model_idle_watcher())
 
 
 @app.on_event("shutdown")
@@ -158,18 +173,106 @@ async def _shutdown_worker() -> None:
     worker_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await worker_task
+    # Stop model watcher and unload model
+    global model_watcher_task
+    if model_watcher_task is not None:
+        model_watcher_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await model_watcher_task
+    try:
+        await run_in_threadpool(_unload_model_sync)
+    except Exception:
+        logger.exception("Failed to unload Whisper model at shutdown")
 
-# Instantiate the Whisper model once at module import for best latency/memory trade-offs.
-model = WhisperModel(
-    settings.whisper_model,
-    device=settings.device,
-    compute_type=settings.compute_type,
-)
+# Model instance and idle-unload management.
+# The model is loaded at startup (to keep previous behaviour) and may be
+# automatically unloaded after `settings.model_unload_seconds` of idle time.
+model: WhisperModel | None = None
+model_last_used: float = 0.0
+model_watcher_task: asyncio.Task[None] | None = None
+
+
+def _update_model_last_used_sync() -> None:
+    global model_last_used
+    model_last_used = time.monotonic()
+
+
+def _load_model_sync() -> None:
+    """Load the Whisper model synchronously (safe to call from a thread).
+
+    Idempotent: will not reload if already loaded.
+    """
+    global model
+    if model is not None:
+        _update_model_last_used_sync()
+        return
+    logger.info(
+        "Loading Whisper model %s device=%s compute_type=%s",
+        settings.whisper_model,
+        settings.device,
+        settings.compute_type,
+    )
+    model = WhisperModel(settings.whisper_model, device=settings.device, compute_type=settings.compute_type)
+    _update_model_last_used_sync()
+
+
+def _unload_model_sync() -> None:
+    """Unload the Whisper model and free caches (best-effort)."""
+    global model
+    if model is None:
+        return
+    logger.info("Unloading Whisper model from memory due to idleness")
+    try:
+        # Remove reference to underlying implementation if present
+        impl = getattr(model, "model", None)
+        if impl is not None:
+            try:
+                del impl
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        del model
+    except Exception:
+        model = None
+    model = None
+    # Best-effort garbage collection and CUDA cache clear
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if getattr(torch, "cuda", None) and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        # torch may not be installed in some environments
+        pass
+
+
+async def _model_idle_watcher() -> None:
+    """Background task: unload model after configured idle timeout."""
+    poll_interval = 5.0
+    while True:
+        try:
+            if model is not None and settings.model_unload_seconds and settings.model_unload_seconds > 0:
+                idle = time.monotonic() - model_last_used
+                if idle >= settings.model_unload_seconds:
+                    await run_in_threadpool(_unload_model_sync)
+        except Exception:
+            logger.exception("Model idle watcher encountered an error")
+        await asyncio.sleep(poll_interval)
 
 
 def _runtime_device() -> str:
     """Return the device actually chosen by faster-whisper."""
 
+    if model is None:
+        return settings.device
     impl = getattr(model, "model", None)
     actual = getattr(impl, "device", None) or getattr(model, "device", None)
     return str(actual) if actual else settings.device
