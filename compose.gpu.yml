@@ -1,5 +1,6 @@
 services:
   whisper-api:
+    image: the80hz/whisper-api:gpu
     build:
       args:
         INSTALL_GPU: "true"

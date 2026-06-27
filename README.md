@@ -138,6 +138,17 @@ For NVIDIA GPU hosts (Linux), use the GPU override:
 docker compose -f compose.yml -f compose.gpu.yml up --build
 ```
 
+If you use the published image instead of building locally, pull the GPU tag:
+
+```bash
+docker compose -f compose.yml -f compose.gpu.yml pull
+docker compose -f compose.yml -f compose.gpu.yml up
+```
+
+The GPU image must contain `nvidia-cudnn-cu12`. If CUDA crashes with a missing
+`libcudnn_ops.so` error, rebuild or pull the `:gpu` image rather than reusing
+`:latest`.
+
 GitHub Actions builds both variants on pull requests. Pushes to `main` publish
 multi-architecture images to Docker Hub as `the80hz/whisper-api:latest` for CPU
 and `the80hz/whisper-api:gpu` for CUDA. Configure repository secrets
