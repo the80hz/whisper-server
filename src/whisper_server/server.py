@@ -97,6 +97,7 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
     # Ensure model is loaded when running in the threadpool
     _load_model_sync()
     _update_model_last_used_sync()
+    started = time.monotonic()
     segments_iter, info = model.transcribe(
         job.audio_path,
         task=job.task,
@@ -105,7 +106,41 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
         initial_prompt=job.initial_prompt,
         temperature=job.temperature,
     )
-    segments = list(segments_iter)
+    duration = float(getattr(info, "duration", 0.0) or 0.0)
+    logger.info(
+        "Transcription started for %s: duration=%.2fs task=%s language=%s",
+        job.filename,
+        duration,
+        job.task,
+        job.language or "auto",
+    )
+
+    segments = []
+    next_progress_percent = 10
+    last_progress_log = started
+    for segment in segments_iter:
+        segments.append(segment)
+        _update_model_last_used_sync()
+
+        segment_end = float(getattr(segment, "end", 0.0) or 0.0)
+        elapsed = time.monotonic() - started
+        progress_percent = min(100.0, (segment_end / duration * 100.0) if duration > 0 else 0.0)
+        should_log_percent = duration > 0 and progress_percent >= next_progress_percent
+        should_log_interval = elapsed - last_progress_log >= 30.0
+        if should_log_percent or should_log_interval:
+            logger.info(
+                "Transcription progress for %s: %.1f%% audio=%.2fs/%.2fs segments=%d elapsed=%.2fs",
+                job.filename,
+                progress_percent,
+                segment_end,
+                duration,
+                len(segments),
+                elapsed,
+            )
+            last_progress_log = time.monotonic()
+            while next_progress_percent <= progress_percent:
+                next_progress_percent += 10
+
     text = "".join(segment.text for segment in segments)
     segment_details = [
         {
