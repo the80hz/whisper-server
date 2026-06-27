@@ -5,8 +5,11 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 ## Features
 
 - Single `/transcribe` endpoint accepting audio uploads via `multipart/form-data`.
+- OpenAI-compatible `/v1/audio/transcriptions` and `/v1/audio/translations` endpoints for drop-in local API usage.
 - One-time in-memory loading of the configured Whisper model for low-latency responses.
 - Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
+- Optional bearer-token authentication via `API_TOKEN`.
+- JSON, plain text, SRT, VTT, and verbose JSON responses.
 - Configurable via environment variables (`sample.env` provided).
 - Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
 
@@ -30,6 +33,17 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
      -F "file=@/path/to/audio.wav"
    ```
 
+6. Or use the OpenAI-compatible endpoint:
+
+   ```bash
+   curl -X POST "http://localhost:3373/v1/audio/transcriptions" \
+     -H "Authorization: Bearer ${API_TOKEN}" \
+     -F "file=@/path/to/audio.wav" \
+     -F "model=whisper-1" \
+     -F "language=ru" \
+     -F "response_format=verbose_json"
+   ```
+
 Alternatively, use the Makefile helpers: `make setup` and `make run`.
 
 ## Configuration
@@ -46,7 +60,9 @@ Environment variables (see `sample.env`):
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
 | `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
 | `DEFAULT_TIMEOUT_SECONDS` | `180` | Per-request timeout when `timeout_seconds` is not provided. |
+| `MODEL_UNLOAD_SECONDS` | `600` | Idle seconds before unloading the model. Set `0` to keep it loaded. |
 | `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
+| `API_TOKEN` | unset | Optional bearer token required for all transcription endpoints when set. |
 
 ## `/transcribe` Arguments
 
@@ -56,6 +72,41 @@ The endpoint supports query parameters in addition to file upload:
 - `language`: language code hint (for example `ru`, `en`)
 - `word_timestamps`: `true/false` to include per-word timestamps
 - `timeout_seconds`: override request timeout for a single call
+
+When `API_TOKEN` is set, include `Authorization: Bearer <token>`.
+
+## OpenAI-Compatible API
+
+`/v1/audio/transcriptions` accepts OpenAI-style multipart form fields:
+
+- `file`: audio or video file upload
+- `model`: accepted for compatibility; the server uses `WHISPER_MODEL`
+- `language`: optional language code hint, for example `ru` or `en`
+- `prompt`: optional initial prompt
+- `response_format`: `json`, `text`, `srt`, `vtt`, or `verbose_json`
+- `temperature`: decoding temperature, default `0`
+- `timeout_seconds`: optional server-side timeout override
+
+`/v1/audio/translations` has the same shape and runs Whisper's `translate` task.
+
+Examples:
+
+```bash
+curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
+  -H "Authorization: Bearer ${API_TOKEN}" \
+  -F "file=@meeting.m4a" \
+  -F "model=whisper-1" \
+  -F "language=ru" \
+  -F "response_format=text"
+```
+
+```bash
+curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
+  -H "Authorization: Bearer ${API_TOKEN}" \
+  -F "file=@lecture.mp4" \
+  -F "model=whisper-1" \
+  -F "response_format=srt"
+```
 
 ## Docker & Compose
 
@@ -79,6 +130,8 @@ For NVIDIA GPU hosts (Linux), use the GPU override:
 ```bash
 docker compose -f compose.yml -f compose.gpu.yml up --build
 ```
+
+For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call it by its private address, for example `http://gpu-box:3373` or `http://100.x.y.z:3373`. Set `API_TOKEN` when the port is reachable by other machines.
 
 ## Project Layout
 

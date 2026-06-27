@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Set to 0 to disable automatic unload.
     model_unload_seconds: float = 600.0
     max_upload_mb: float = 50.0
+    api_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
