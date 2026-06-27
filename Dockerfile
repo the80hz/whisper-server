@@ -2,10 +2,16 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm AS build
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+ARG INSTALL_GPU=false
+
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --no-dev
+RUN if [ "$INSTALL_GPU" = "true" ]; then \
+        uv sync --frozen --no-dev --extra gpu; \
+    else \
+        uv sync --frozen --no-dev; \
+    fi
 
 FROM python:3.13-slim
 
@@ -15,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/.venv /app/.venv

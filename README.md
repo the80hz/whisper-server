@@ -117,6 +117,13 @@ docker build -t whisper-server .
 docker run --env-file .env -p ${PORT:-3373}:${PORT:-3373} whisper-server
 ```
 
+The default image is CPU-only to keep uploads smaller. To build an image with
+CUDA runtime libraries bundled:
+
+```bash
+docker build --build-arg INSTALL_GPU=true -t whisper-server:gpu .
+```
+
 Or use Compose:
 
 ```bash
@@ -130,6 +137,11 @@ For NVIDIA GPU hosts (Linux), use the GPU override:
 ```bash
 docker compose -f compose.yml -f compose.gpu.yml up --build
 ```
+
+GitHub Actions builds both variants on pull requests. Pushes to `main` publish
+multi-architecture images to Docker Hub as `the80hz/whisper-api:latest` for CPU
+and `the80hz/whisper-api:gpu` for CUDA. Configure repository secrets
+`DOCKER_USERNAME` and `DOCKER_TOKEN` before publishing.
 
 For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call it by its private address, for example `http://gpu-box:3373` or `http://100.x.y.z:3373`. Set `API_TOKEN` when the port is reachable by other machines.
 

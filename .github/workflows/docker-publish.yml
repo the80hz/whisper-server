@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -11,6 +14,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            install_gpu: "false"
+            latest_tag: latest
+            sha_prefix: sha-
+            ref_suffix: ""
+          - variant: gpu
+            install_gpu: "true"
+            latest_tag: gpu
+            sha_prefix: gpu-sha-
+            ref_suffix: -gpu
 
     steps:
       - name: Checkout
@@ -20,32 +37,35 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Extract Docker metadata
+      - name: Extract Docker metadata (${{ matrix.variant }})
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: the80hz/whisper-api
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-            type=ref,event=branch
+            type=raw,value=${{ matrix.latest_tag }},enable={{is_default_branch}}
+            type=sha,format=short,prefix=${{ matrix.sha_prefix }}
+            type=ref,event=branch,suffix=${{ matrix.ref_suffix }}
 
-      - name: Build and push
+      - name: Build and push (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           platforms: linux/amd64,linux/arm64
           context: .
           file: ./Dockerfile
-          push: true
+          build-args: |
+            INSTALL_GPU=${{ matrix.install_gpu }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

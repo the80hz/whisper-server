@@ -1,5 +1,8 @@
 services:
   whisper-api:
+    build:
+      args:
+        INSTALL_GPU: "true"
     deploy:
       resources:
         reservations:
