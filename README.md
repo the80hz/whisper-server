@@ -9,6 +9,7 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 - One-time in-memory loading of the configured Whisper model for low-latency responses.
 - Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
 - Optional bearer-token authentication via `API_TOKEN`.
+- Backward-compatible `API_KEY` alias for older bratishkabot whisper deployments.
 - JSON, plain text, SRT, VTT, and verbose JSON responses.
 - Configurable via environment variables (`sample.env` provided).
 - Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
@@ -60,9 +61,12 @@ Environment variables (see `sample.env`):
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
 | `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
 | `DEFAULT_TIMEOUT_SECONDS` | `180` | Per-request timeout when `timeout_seconds` is not provided. |
+| `VAD_FILTER` | `true` | Enable faster-whisper VAD filtering before transcription. |
+| `CPU_THREADS` | `0` | CPU worker threads passed to faster-whisper when greater than `0`; `0` means auto. |
 | `MODEL_UNLOAD_SECONDS` | `600` | Idle seconds before unloading the model. Set `0` to keep it loaded. |
 | `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
 | `API_TOKEN` | unset | Optional bearer token required for all transcription endpoints when set. |
+| `API_KEY` | unset | Compatibility alias for `API_TOKEN`; `API_TOKEN` takes precedence. |
 
 ## `/transcribe` Arguments
 
@@ -73,7 +77,13 @@ The endpoint supports query parameters in addition to file upload:
 - `word_timestamps`: `true/false` to include per-word timestamps
 - `timeout_seconds`: override request timeout for a single call
 
-When `API_TOKEN` is set, include `Authorization: Bearer <token>`.
+When `API_TOKEN` or `API_KEY` is set, include `Authorization: Bearer <token>`.
+
+This endpoint is compatible with the current `bratishkabot` remote STT client:
+
+- `GET /health` returns a JSON object with `status`.
+- `POST /transcribe?language=ru` accepts a Telegram `voice.ogg` upload in multipart field `file`.
+- The response includes a top-level `text` field.
 
 ## OpenAI-Compatible API
 

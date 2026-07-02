@@ -55,12 +55,14 @@ def test_vtt_rendering():
 
 def test_auth_is_noop_without_token(monkeypatch):
     monkeypatch.setattr(server.settings, "api_token", None)
+    monkeypatch.setattr(server.settings, "api_key", None)
 
     assert server._check_auth(None) is None
 
 
 def test_auth_rejects_invalid_token(monkeypatch):
     monkeypatch.setattr(server.settings, "api_token", "secret")
+    monkeypatch.setattr(server.settings, "api_key", None)
 
     with pytest.raises(HTTPException) as exc_info:
         server._check_auth("Bearer wrong")
@@ -70,5 +72,20 @@ def test_auth_rejects_invalid_token(monkeypatch):
 
 def test_auth_accepts_valid_token(monkeypatch):
     monkeypatch.setattr(server.settings, "api_token", "secret")
+    monkeypatch.setattr(server.settings, "api_key", None)
 
     assert server._check_auth("Bearer secret") is None
+
+
+def test_auth_accepts_legacy_api_key(monkeypatch):
+    monkeypatch.setattr(server.settings, "api_token", None)
+    monkeypatch.setattr(server.settings, "api_key", "legacy-secret")
+
+    assert server._check_auth("Bearer legacy-secret") is None
+
+
+def test_api_token_takes_precedence_over_legacy_api_key(monkeypatch):
+    monkeypatch.setattr(server.settings, "api_token", "new-secret")
+    monkeypatch.setattr(server.settings, "api_key", "legacy-secret")
+
+    assert server._check_auth("Bearer new-secret") is None

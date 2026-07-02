@@ -11,6 +11,7 @@ import secrets
 import tempfile
 import time
 import wave
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,11 +36,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("whisper-api")
 
-app = FastAPI(title="Whisper Server", version="0.1.0")
 app_started_at = time.time()
 transcription_queue: asyncio.Queue["TranscriptionJob"] = asyncio.Queue(maxsize=settings.queue_max_size)
 worker_task: asyncio.Task[None] | None = None
 ResponseFormat = Literal["json", "text", "srt", "verbose_json", "vtt"]
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    await _startup_worker()
+    try:
+        yield
+    finally:
+        await _shutdown_worker()
+
+
+app = FastAPI(title="Whisper Server", version="0.1.0", lifespan=_lifespan)
 
 
 @dataclass(slots=True)
@@ -105,6 +117,7 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
         word_timestamps=job.word_timestamps,
         initial_prompt=job.initial_prompt,
         temperature=job.temperature,
+        vad_filter=settings.vad_filter,
     )
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     logger.info(
@@ -236,11 +249,16 @@ def _media_type(response_format: ResponseFormat) -> str:
     return "text/plain; charset=utf-8"
 
 
+def _configured_api_token() -> str | None:
+    return settings.api_token or settings.api_key
+
+
 def _check_auth(authorization: str | None = Header(default=None)) -> None:
-    if not settings.api_token:
+    api_token = _configured_api_token()
+    if not api_token:
         return
     scheme, _, token = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not secrets.compare_digest(token, settings.api_token):
+    if scheme.lower() != "bearer" or not secrets.compare_digest(token, api_token):
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid bearer token",
@@ -351,7 +369,6 @@ async def _transcription_worker() -> None:
             transcription_queue.task_done()
 
 
-@app.on_event("startup")
 async def _startup_worker() -> None:
     global worker_task
     worker_task = asyncio.create_task(_transcription_worker())
@@ -367,7 +384,6 @@ async def _startup_worker() -> None:
         model_watcher_task = asyncio.create_task(_model_idle_watcher())
 
 
-@app.on_event("shutdown")
 async def _shutdown_worker() -> None:
     if worker_task is None:
         return
@@ -408,12 +424,22 @@ def _load_model_sync() -> None:
         _update_model_last_used_sync()
         return
     logger.info(
-        "Loading Whisper model %s device=%s compute_type=%s",
+        "Loading Whisper model %s device=%s compute_type=%s cpu_threads=%s",
         settings.whisper_model,
         settings.device,
         settings.compute_type,
+        settings.cpu_threads,
     )
-    model = WhisperModel(settings.whisper_model, device=settings.device, compute_type=settings.compute_type)
+    model_kwargs: dict[str, Any] = {
+        "device": settings.device,
+        "compute_type": settings.compute_type,
+    }
+    if settings.cpu_threads > 0:
+        model_kwargs["cpu_threads"] = settings.cpu_threads
+    model = WhisperModel(
+        settings.whisper_model,
+        **model_kwargs,
+    )
     _update_model_last_used_sync()
 
 
@@ -503,6 +529,8 @@ async def health() -> dict[str, float | str]:
         "model": settings.whisper_model,
         "device": _runtime_device(),
         "compute_type": settings.compute_type,
+        "vad_filter": str(settings.vad_filter),
+        "cpu_threads": str(settings.cpu_threads),
         "log_level": settings.log_level.upper(),
         "queue_size": str(transcription_queue.qsize()),
         "queue_capacity": str(settings.queue_max_size),
