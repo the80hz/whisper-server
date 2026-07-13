@@ -14,12 +14,15 @@ import wave
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
+from faster_whisper.tokenizer import _LANGUAGE_CODES
+from pydantic import BeforeValidator
 
 from .config import settings
 
@@ -40,6 +43,64 @@ app_started_at = time.time()
 transcription_queue: asyncio.Queue["TranscriptionJob"] = asyncio.Queue(maxsize=settings.queue_max_size)
 worker_task: asyncio.Task[None] | None = None
 ResponseFormat = Literal["json", "text", "srt", "verbose_json", "vtt"]
+
+
+def _argument_default(name: str, value: Any, default: Any) -> Any:
+    logger.warning("Invalid request argument %s=%r; using default %r", name, value, default)
+    return default
+
+
+def _valid_task(value: Any) -> str:
+    return value if value in {"transcribe", "translate"} else _argument_default("task", value, "transcribe")
+
+
+def _valid_response_format(value: Any) -> str:
+    valid = {"json", "text", "srt", "verbose_json", "vtt"}
+    return value if value in valid else _argument_default("response_format", value, "json")
+
+
+def _valid_language(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    normalized = str(value).lower().strip()
+    return normalized if normalized in _LANGUAGE_CODES else _argument_default("language", value, None)
+
+
+def _valid_bool_argument(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).lower().strip()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return _argument_default("word_timestamps", value, False)
+
+
+def _valid_temperature(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return _argument_default("temperature", value, 0.0)
+    return parsed if isfinite(parsed) and 0 <= parsed <= 1 else _argument_default("temperature", value, 0.0)
+
+
+def _valid_timeout(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return _argument_default("timeout_seconds", value, None)
+    return parsed if isfinite(parsed) and parsed > 0 else _argument_default("timeout_seconds", value, None)
+
+
+TaskArgument = Annotated[Literal["transcribe", "translate"], BeforeValidator(_valid_task)]
+ResponseFormatArgument = Annotated[ResponseFormat, BeforeValidator(_valid_response_format)]
+LanguageArgument = Annotated[str | None, BeforeValidator(_valid_language)]
+BoolArgument = Annotated[bool, BeforeValidator(_valid_bool_argument)]
+TemperatureArgument = Annotated[float, BeforeValidator(_valid_temperature)]
+TimeoutArgument = Annotated[float | None, BeforeValidator(_valid_timeout)]
 
 
 @asynccontextmanager
@@ -571,10 +632,10 @@ async def health() -> dict[str, float | str]:
 async def transcribe(
     _: None = Depends(_check_auth),
     file: UploadFile = File(...),
-    task: Literal["transcribe", "translate"] = Query(default="transcribe"),
-    language: str | None = Query(default=None),
-    word_timestamps: bool = Query(default=False),
-    timeout_seconds: float | None = Query(default=None, gt=0),
+    task: Annotated[TaskArgument, Query()] = "transcribe",
+    language: Annotated[LanguageArgument, Query()] = None,
+    word_timestamps: Annotated[BoolArgument, Query()] = False,
+    timeout_seconds: Annotated[TimeoutArgument, Query()] = None,
 ) -> dict[str, Any]:
     return await _enqueue_transcription(
         file=file,
@@ -590,11 +651,11 @@ async def openai_audio_transcriptions(
     _: None = Depends(_check_auth),
     file: UploadFile = File(...),
     model: str = Form(default="whisper-1"),
-    language: str | None = Form(default=None),
+    language: Annotated[LanguageArgument, Form()] = None,
     prompt: str | None = Form(default=None),
-    response_format: ResponseFormat = Form(default="json"),
-    temperature: float = Form(default=0.0),
-    timeout_seconds: float | None = Form(default=None),
+    response_format: Annotated[ResponseFormatArgument, Form()] = "json",
+    temperature: Annotated[TemperatureArgument, Form()] = 0.0,
+    timeout_seconds: Annotated[TimeoutArgument, Form()] = None,
 ) -> Any:
     if model not in {"whisper-1", settings.whisper_model}:
         logger.info("Ignoring OpenAI-compatible model=%s; using configured model=%s", model, settings.whisper_model)
@@ -621,9 +682,9 @@ async def openai_audio_translations(
     file: UploadFile = File(...),
     model: str = Form(default="whisper-1"),
     prompt: str | None = Form(default=None),
-    response_format: ResponseFormat = Form(default="json"),
-    temperature: float = Form(default=0.0),
-    timeout_seconds: float | None = Form(default=None),
+    response_format: Annotated[ResponseFormatArgument, Form()] = "json",
+    temperature: Annotated[TemperatureArgument, Form()] = 0.0,
+    timeout_seconds: Annotated[TimeoutArgument, Form()] = None,
 ) -> Any:
     if model not in {"whisper-1", settings.whisper_model}:
         logger.info("Ignoring OpenAI-compatible model=%s; using configured model=%s", model, settings.whisper_model)

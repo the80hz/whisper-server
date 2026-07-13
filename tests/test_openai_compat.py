@@ -1,9 +1,12 @@
 from typing import Any, cast
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 import pytest
 
 from whisper_server import server
+from whisper_server.config import Settings
 
 
 def _result():
@@ -121,6 +124,98 @@ def test_explicit_nonzero_temperature_disables_fallback(monkeypatch):
     options = server._transcription_options(_job(temperature=0.4))
 
     assert options["temperature"] == 0.4
+
+
+@pytest.mark.parametrize(
+    ("adapter", "value", "default"),
+    [
+        (server.TaskArgument, "invalid", "transcribe"),
+        (server.ResponseFormatArgument, "invalid", "json"),
+        (server.LanguageArgument, "invalid", None),
+        (server.BoolArgument, "invalid", False),
+        (server.TemperatureArgument, "nan", 0.0),
+        (server.TemperatureArgument, "2", 0.0),
+        (server.TimeoutArgument, "invalid", None),
+        (server.TimeoutArgument, "-1", None),
+    ],
+)
+def test_invalid_request_arguments_use_defaults(adapter, value, default):
+    assert TypeAdapter(adapter).validate_python(value) == default
+
+
+def test_invalid_decode_settings_use_defaults():
+    invalid = Settings(
+        _env_file=None,
+        device="tpu",
+        compute_type="quantum",
+        vad_filter="maybe",
+        vad_threshold="nan",
+        repetition_penalty="0.5",
+        no_repeat_ngram_size="-3",
+        hallucination_silence_threshold="-1",
+    )
+
+    assert invalid.device == "auto"
+    assert invalid.compute_type == "int8"
+    assert invalid.vad_filter is True
+    assert invalid.vad_threshold == 0.5
+    assert invalid.repetition_penalty == 1.1
+    assert invalid.no_repeat_ngram_size == 3
+    assert invalid.hallucination_silence_threshold == 1.0
+
+
+def test_invalid_http_arguments_reach_handler_as_defaults(monkeypatch):
+    received = {}
+
+    async def fake_enqueue(**kwargs):
+        received.update(kwargs)
+        return _result()
+
+    monkeypatch.setattr(server, "_enqueue_transcription", fake_enqueue)
+    client = TestClient(server.app)
+    response = client.post(
+        "/transcribe",
+        params={
+            "task": "invalid",
+            "language": "invalid",
+            "word_timestamps": "invalid",
+            "timeout_seconds": "invalid",
+        },
+        files={"file": ("sample.ogg", b"audio")},
+    )
+
+    assert response.status_code == 200
+    assert received["task"] == "transcribe"
+    assert received["language"] is None
+    assert received["word_timestamps"] is False
+    assert received["timeout_seconds"] is None
+
+
+def test_invalid_openai_form_arguments_reach_handler_as_defaults(monkeypatch):
+    received = {}
+
+    async def fake_enqueue(**kwargs):
+        received.update(kwargs)
+        return _result()
+
+    monkeypatch.setattr(server, "_enqueue_transcription", fake_enqueue)
+    client = TestClient(server.app)
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={
+            "language": "invalid",
+            "response_format": "invalid",
+            "temperature": "nan",
+            "timeout_seconds": "invalid",
+        },
+        files={"file": ("sample.ogg", b"audio")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": " Привет мир"}
+    assert received["language"] is None
+    assert received["temperature"] == 0.0
+    assert received["timeout_seconds"] is None
 
 
 def test_api_token_takes_precedence_over_legacy_api_key(monkeypatch):
