@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from fastapi import HTTPException
 import pytest
 
@@ -82,6 +84,43 @@ def test_auth_accepts_legacy_api_key(monkeypatch):
     monkeypatch.setattr(server.settings, "api_key", "legacy-secret")
 
     assert server._check_auth("Bearer legacy-secret") is None
+
+
+def _job(*, temperature: float = 0.0, word_timestamps: bool = False):
+    return server.TranscriptionJob(
+        filename="sample.ogg",
+        audio_path="/tmp/sample.ogg",
+        task="transcribe",
+        language=None,
+        word_timestamps=word_timestamps,
+        initial_prompt=None,
+        temperature=temperature,
+        future=cast(Any, None),
+    )
+
+
+def test_transcription_options_enable_repetition_safeguards(monkeypatch):
+    monkeypatch.setattr(server.settings, "temperature_fallback", True)
+    monkeypatch.setattr(server.settings, "hallucination_silence_threshold", 1.0)
+    monkeypatch.setattr(server.settings, "vad_filter", True)
+
+    options = server._transcription_options(_job())
+
+    assert options["temperature"] == (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    assert options["condition_on_previous_text"] is False
+    assert options["repetition_penalty"] == 1.1
+    assert options["no_repeat_ngram_size"] == 3
+    assert options["word_timestamps"] is True
+    assert options["hallucination_silence_threshold"] == 1.0
+    assert options["vad_parameters"]["min_silence_duration_ms"] == 500
+
+
+def test_explicit_nonzero_temperature_disables_fallback(monkeypatch):
+    monkeypatch.setattr(server.settings, "temperature_fallback", True)
+
+    options = server._transcription_options(_job(temperature=0.4))
+
+    assert options["temperature"] == 0.4
 
 
 def test_api_token_takes_precedence_over_legacy_api_key(monkeypatch):

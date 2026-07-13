@@ -62,6 +62,17 @@ Environment variables (see `sample.env`):
 | `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
 | `DEFAULT_TIMEOUT_SECONDS` | `180` | Per-request timeout when `timeout_seconds` is not provided. |
 | `VAD_FILTER` | `true` | Enable faster-whisper VAD filtering before transcription. |
+| `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
+| `VAD_MIN_SILENCE_DURATION_MS` | `500` | Silence duration used to split speech regions. |
+| `VAD_SPEECH_PAD_MS` | `200` | Audio padding retained around detected speech. |
+| `CONDITION_ON_PREVIOUS_TEXT` | `false` | Feed the previous window into the next one; disabled by default to prevent repetition loops. |
+| `REPETITION_PENALTY` | `1.1` | Penalty applied to tokens that were already generated. |
+| `NO_REPEAT_NGRAM_SIZE` | `3` | Prevent repeated n-grams of this size; `0` disables the restriction. |
+| `COMPRESSION_RATIO_THRESHOLD` | `2.2` | Treat highly compressible (usually repetitive) output as a failed decoding attempt. |
+| `LOG_PROB_THRESHOLD` | `-1.0` | Retry decoding when average token probability is too low. |
+| `NO_SPEECH_THRESHOLD` | `0.6` | Probability threshold used to classify a window as silence. |
+| `TEMPERATURE_FALLBACK` | `true` | Retry zero-temperature decoding at increasing temperatures when quality thresholds fail. |
+| `HALLUCINATION_SILENCE_THRESHOLD` | `1.0` | Skip silence around suspected hallucinations; `0` disables this behavior. |
 | `CPU_THREADS` | `0` | CPU worker threads passed to faster-whisper when greater than `0`; `0` means auto. |
 | `MODEL_UNLOAD_SECONDS` | `600` | Idle seconds before unloading the model. Set `0` to keep it loaded. |
 | `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |

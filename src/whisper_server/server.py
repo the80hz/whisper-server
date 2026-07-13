@@ -110,15 +110,7 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
     _load_model_sync()
     _update_model_last_used_sync()
     started = time.monotonic()
-    segments_iter, info = model.transcribe(
-        job.audio_path,
-        task=job.task,
-        language=job.language,
-        word_timestamps=job.word_timestamps,
-        initial_prompt=job.initial_prompt,
-        temperature=job.temperature,
-        vad_filter=settings.vad_filter,
-    )
+    segments_iter, info = model.transcribe(job.audio_path, **_transcription_options(job))
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     logger.info(
         "Transcription started for %s: duration=%.2fs task=%s language=%s",
@@ -188,6 +180,41 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
             for word in (segment.words or [])
         ]
     return payload
+
+
+def _transcription_options(job: TranscriptionJob) -> dict[str, Any]:
+    """Build faster-whisper options with safeguards against repetition loops."""
+
+    temperature: float | tuple[float, ...] = job.temperature
+    if settings.temperature_fallback and job.temperature == 0:
+        temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+
+    # faster-whisper's hallucination-on-silence detection requires word timestamps,
+    # but words are only included in the API response when the caller requested them.
+    detect_silence_hallucinations = settings.hallucination_silence_threshold > 0
+    options: dict[str, Any] = {
+        "task": job.task,
+        "language": job.language,
+        "word_timestamps": job.word_timestamps or detect_silence_hallucinations,
+        "initial_prompt": job.initial_prompt,
+        "temperature": temperature,
+        "vad_filter": settings.vad_filter,
+        "condition_on_previous_text": settings.condition_on_previous_text,
+        "repetition_penalty": settings.repetition_penalty,
+        "no_repeat_ngram_size": settings.no_repeat_ngram_size,
+        "compression_ratio_threshold": settings.compression_ratio_threshold,
+        "log_prob_threshold": settings.log_prob_threshold,
+        "no_speech_threshold": settings.no_speech_threshold,
+    }
+    if settings.vad_filter:
+        options["vad_parameters"] = {
+            "threshold": settings.vad_threshold,
+            "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
+            "speech_pad_ms": settings.vad_speech_pad_ms,
+        }
+    if detect_silence_hallucinations:
+        options["hallucination_silence_threshold"] = settings.hallucination_silence_threshold
+    return options
 
 
 def _format_timestamp(seconds: float, *, separator: str) -> str:

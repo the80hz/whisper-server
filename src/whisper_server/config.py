@@ -11,6 +11,17 @@ class Settings(BaseSettings):
     queue_max_size: int = 8
     default_timeout_seconds: float = 180.0
     vad_filter: bool = True
+    vad_threshold: float = 0.5
+    vad_min_silence_duration_ms: int = 500
+    vad_speech_pad_ms: int = 200
+    condition_on_previous_text: bool = False
+    repetition_penalty: float = 1.1
+    no_repeat_ngram_size: int = 3
+    compression_ratio_threshold: float = 2.2
+    log_prob_threshold: float = -1.0
+    no_speech_threshold: float = 0.6
+    temperature_fallback: bool = True
+    hallucination_silence_threshold: float = 1.0
     cpu_threads: int = 0
     # If >0, automatically unload the Whisper model after this many seconds of idle time.
     # Set to 0 to disable automatic unload.
