@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -39,18 +40,23 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract Docker metadata (${{ matrix.variant }})
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: the80hz/whisper-api
+          images: ghcr.io/${{ github.repository_owner }}/whisper-api
+          # Links the package to this repository, which is what makes it inherit
+          # the repository's public visibility instead of defaulting to private.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           tags: |
             type=raw,value=${{ matrix.latest_tag }},enable={{is_default_branch}}
             type=sha,format=short,prefix=${{ matrix.sha_prefix }}

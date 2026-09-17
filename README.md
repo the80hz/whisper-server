@@ -227,9 +227,11 @@ The GPU image must contain `nvidia-cudnn-cu12`. If CUDA crashes with a missing
 `:latest`.
 
 GitHub Actions builds both variants on pull requests. Pushes to `main` publish
-multi-architecture images to Docker Hub as `the80hz/whisper-api:latest` for CPU
-and `the80hz/whisper-api:gpu` for CUDA. Configure repository secrets
-`DOCKER_USERNAME` and `DOCKER_TOKEN` before publishing.
+multi-architecture images to the GitHub Container Registry as
+`ghcr.io/the80hz/whisper-api:latest` for CPU and `ghcr.io/the80hz/whisper-api:gpu`
+for CUDA. No registry secrets are needed: the workflow authenticates with the
+built-in `GITHUB_TOKEN` and `packages: write`, and the package inherits this
+repository's visibility, so the images pull anonymously.
 
 For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call it by its private address, for example `http://gpu-box:3373` or `http://100.x.y.z:3373`. Set `API_TOKEN` when the port is reachable by other machines.
 
