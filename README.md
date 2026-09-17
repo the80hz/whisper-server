@@ -6,7 +6,11 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 
 - Single `/transcribe` endpoint accepting audio uploads via `multipart/form-data`.
 - OpenAI-compatible `/v1/audio/transcriptions` and `/v1/audio/translations` endpoints for drop-in local API usage.
-- One-time in-memory loading of the configured Whisper model for low-latency responses.
+- Lazy model loading with an idle sleep: the model is unloaded after
+  `MODEL_UNLOAD_SECONDS` and reloaded on the next request, so a shared GPU is
+  only held while there is work.
+- Automatic CPU fallback when CUDA runs out of memory, using a CPU-sized model
+  and a CPU-supported compute type.
 - Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
 - Optional bearer-token authentication via `API_TOKEN`.
 - Backward-compatible `API_KEY` alias for older bratishkabot whisper deployments.
@@ -74,10 +78,62 @@ Environment variables (see `sample.env`):
 | `TEMPERATURE_FALLBACK` | `true` | Retry zero-temperature decoding at increasing temperatures when quality thresholds fail. |
 | `HALLUCINATION_SILENCE_THRESHOLD` | `1.0` | Skip silence around suspected hallucinations; `0` disables this behavior. |
 | `CPU_THREADS` | `0` | CPU worker threads passed to faster-whisper when greater than `0`; `0` means auto. |
-| `MODEL_UNLOAD_SECONDS` | `600` | Idle seconds before unloading the model. Set `0` to keep it loaded. |
+| `MODEL_UNLOAD_SECONDS` | `60` | Idle seconds before the model is unloaded and its VRAM released. Set `0` to keep it loaded. |
+| `HEALTH_WAKE_MODEL` | `false` | Let `/health` wake a sleeping model for its probe. See [Idle sleep and CPU fallback](#idle-sleep-and-cpu-fallback). |
+| `CUDA_OOM_FALLBACK_CPU` | `true` | Fall back to CPU inference when CUDA is out of memory. |
+| `CPU_FALLBACK_MODEL` | `small` | Model used by that fallback; empty keeps `WHISPER_MODEL`. |
+| `CPU_FALLBACK_COMPUTE_TYPE` | `int8` | Compute type for CPU runs; GPU-only types are not supported on CPU. |
 | `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
 | `API_TOKEN` | unset | Optional bearer token required for all transcription endpoints when set. |
 | `API_KEY` | unset | Compatibility alias for `API_TOKEN`; `API_TOKEN` takes precedence. |
+
+## Idle Sleep and CPU Fallback
+
+The model is not kept in memory between requests. After `MODEL_UNLOAD_SECONDS`
+without work it is unloaded, its VRAM is released, and the next request loads it
+again. On a GPU shared with other services this is what lets them use the card
+while no transcription is running; the cost is the model load time on the first
+request after a sleep.
+
+Because the GPU is shared, a wake-up can land while another process holds the
+VRAM. When `CUDA_OOM_FALLBACK_CPU` is set, a CUDA out-of-memory error does not
+fail the request: the model is loaded for CPU inference instead, and the
+transcription continues. CTranslate2 allocates lazily, so this is handled both
+when the model loads and when the GPU runs out of memory mid-transcription.
+
+A CPU run is not the GPU run with a different device flag:
+
+- **Model.** `WHISPER_MODEL` is sized for the GPU. On a 4-core container CPU
+  (Xeon E5-2690 v4, `int8`, Russian speech) `large-v3-turbo` measured a real-time
+  factor of 0.88 against 0.38 for `small`, which leaves almost no headroom before
+  `DEFAULT_TIMEOUT_SECONDS` once decoding retries at higher temperatures. The
+  fallback therefore loads `CPU_FALLBACK_MODEL`, a smaller multilingual model,
+  unless that value is empty. `base` is faster still but drops digits, and the
+  `distil-*` models are English-only.
+- **Compute type.** GPU compute types such as `int8_float16` and `float16` have
+  no CPU kernels in CTranslate2. Any CPU run uses `CPU_FALLBACK_COMPUTE_TYPE`,
+  checked against `ctranslate2.get_supported_compute_types("cpu")` and downgraded
+  to a supported type if needed. This also applies to an explicit `DEVICE=cpu`
+  and to `DEVICE=auto` on a host without a GPU, where the configured
+  `WHISPER_MODEL` is still honoured.
+
+The fallback is per load: the next wake-up tries the GPU again.
+
+`/health` reports the current state:
+
+| Field | Meaning |
+| --- | --- |
+| `model_state` | `loaded` or `sleeping` |
+| `device` / `compute_type` | What the loaded model actually uses, not what is configured |
+| `cpu_fallback` | `True` when the model is on CPU after a CUDA out-of-memory error |
+| `model_idle_seconds` / `model_unload_seconds` | How close the model is to being unloaded |
+
+The probe transcribes a silent clip, which needs the model in memory. A sleeping
+model is left asleep and `/health` still answers `"status": "ok"`, so a monitor
+polling more often than `MODEL_UNLOAD_SECONDS` does not pin the model in VRAM.
+`GET /health?wake=true` forces a full probe, and `HEALTH_WAKE_MODEL=true` makes
+that the default. A probe of an already-loaded model does not postpone its
+unload.
 
 ## `/transcribe` Arguments
 

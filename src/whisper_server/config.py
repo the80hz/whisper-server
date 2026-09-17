@@ -33,7 +33,17 @@ class Settings(BaseSettings):
     cpu_threads: int = 0
     # If >0, automatically unload the Whisper model after this many seconds of idle time.
     # Set to 0 to disable automatic unload.
-    model_unload_seconds: float = 600.0
+    model_unload_seconds: float = 60.0
+    # Run a /health probe only when it does not have to wake a sleeping model.
+    health_wake_model: bool = False
+    # Fall back to CPU inference when CUDA runs out of memory.
+    cuda_oom_fallback_cpu: bool = True
+    # Model used by that CPU fallback. Empty keeps WHISPER_MODEL, which is usually
+    # far too slow on CPU for the GPU-sized default.
+    cpu_fallback_model: str = "small"
+    # Compute type for any CPU run. GPU-only types such as int8_float16 are not
+    # supported by CTranslate2 on CPU.
+    cpu_fallback_compute_type: str = "int8"
     max_upload_mb: float = 50.0
     api_token: str | None = None
     # Backward-compatible alias used by bratishkabot-whisper-server.
@@ -57,7 +67,7 @@ class Settings(BaseSettings):
         normalized = str(value).lower().strip()
         return normalized if normalized in {"auto", "cpu", "cuda"} else cls._default(info, value)
 
-    @field_validator("compute_type", mode="before")
+    @field_validator("compute_type", "cpu_fallback_compute_type", mode="before")
     @classmethod
     def _valid_compute_type(cls, value: Any, info: ValidationInfo) -> str:
         normalized = str(value).lower().strip()
@@ -75,7 +85,14 @@ class Settings(BaseSettings):
         }
         return normalized if normalized in valid else cls._default(info, value)
 
-    @field_validator("vad_filter", "condition_on_previous_text", "temperature_fallback", mode="before")
+    @field_validator(
+        "vad_filter",
+        "condition_on_previous_text",
+        "temperature_fallback",
+        "health_wake_model",
+        "cuda_oom_fallback_cpu",
+        mode="before",
+    )
     @classmethod
     def _valid_bool(cls, value: Any, info: ValidationInfo) -> bool:
         if isinstance(value, bool):

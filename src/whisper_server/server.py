@@ -9,14 +9,16 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
 import wave
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -154,10 +156,12 @@ def _run_probe() -> dict[str, float | str | int]:
     """Run a minimal transcription to verify the model end-to-end."""
 
     start = time.monotonic()
-    # Ensure model is loaded for the probe
-    _load_model_sync()
-    segments_iter, info = model.transcribe(str(HEALTH_CLIP_PATH), task="transcribe", temperature=0.0)
-    text = "".join(segment.text for segment in segments_iter)
+
+    def run(instance: WhisperModel) -> tuple[Any, str]:
+        segments_iter, info = instance.transcribe(str(HEALTH_CLIP_PATH), task="transcribe", temperature=0.0)
+        return info, "".join(segment.text for segment in segments_iter)
+
+    info, text = _run_with_cuda_fallback(run, what="health probe")
     elapsed = time.monotonic() - start
     return {
         "probe_duration": round(info.duration, 3),
@@ -166,12 +170,11 @@ def _run_probe() -> dict[str, float | str | int]:
     }
 
 
-def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
-    # Ensure model is loaded when running in the threadpool
-    _load_model_sync()
-    _update_model_last_used_sync()
+def _collect_segments(instance: WhisperModel, job: TranscriptionJob) -> tuple[list[Any], Any]:
+    """Decode `job` with `instance`, logging progress as segments arrive."""
+
     started = time.monotonic()
-    segments_iter, info = model.transcribe(job.audio_path, **_transcription_options(job))
+    segments_iter, info = instance.transcribe(job.audio_path, **_transcription_options(job))
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     logger.info(
         "Transcription started for %s: duration=%.2fs task=%s language=%s",
@@ -207,6 +210,14 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
             while next_progress_percent <= progress_percent:
                 next_progress_percent += 10
 
+    return segments, info
+
+
+def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
+    segments, info = _run_with_cuda_fallback(
+        lambda instance: _collect_segments(instance, job),
+        what=f"transcription of {job.filename}",
+    )
     text = "".join(segment.text for segment in segments)
     segment_details = [
         {
@@ -485,16 +496,115 @@ async def _shutdown_worker() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await model_watcher_task
     try:
-        await run_in_threadpool(_unload_model_sync)
+        await run_in_threadpool(lambda: _unload_model_sync(force=True))
     except Exception:
         logger.exception("Failed to unload Whisper model at shutdown")
 
 # Model instance and idle-unload management.
 # The model is loaded at startup (to keep previous behaviour) and may be
 # automatically unloaded after `settings.model_unload_seconds` of idle time.
+# The transcription worker, the health probe and the idle watcher all reach this
+# state from different threadpool threads, so every load, unload and device
+# switch happens under `model_lock`, and `model_in_use` keeps the watcher from
+# unloading a model that is mid-transcription.
 model: WhisperModel | None = None
+model_lock = threading.RLock()
 model_last_used: float = 0.0
+model_in_use: int = 0
+model_name: str = settings.whisper_model
+model_device: str = settings.device
+model_compute_type: str = settings.compute_type
+model_cpu_fallback: bool = False
 model_watcher_task: asyncio.Task[None] | None = None
+
+T = TypeVar("T")
+
+# CTranslate2 surfaces CUDA allocation failures as a plain RuntimeError, so the
+# message is all there is to match on.
+CUDA_OOM_MARKERS = (
+    "out of memory",
+    "cuda_error_out_of_memory",
+    "cublas_status_alloc_failed",
+    "cudamalloc",
+    "failed to allocate",
+    "bad_alloc",
+)
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    message = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in message for marker in CUDA_OOM_MARKERS)
+
+
+def _cuda_device_count() -> int:
+    try:
+        import ctranslate2
+
+        return int(ctranslate2.get_cuda_device_count())
+    except Exception:  # noqa: BLE001 - treated as "no usable GPU"
+        logger.debug("Could not query CUDA device count", exc_info=True)
+        return 0
+
+
+def _resolve_device() -> str:
+    """Resolve DEVICE=auto to the device faster-whisper would pick itself."""
+
+    if settings.device != "auto":
+        return settings.device
+    return "cuda" if _cuda_device_count() > 0 else "cpu"
+
+
+def _cpu_compute_type() -> str:
+    """Return a compute type CTranslate2 actually supports on this CPU.
+
+    GPU compute types such as `int8_float16` have no CPU kernels, and a CPU run
+    configured with one is silently downgraded, so pick a supported type here.
+    """
+
+    wanted = settings.cpu_fallback_compute_type
+    try:
+        import ctranslate2
+
+        supported = set(ctranslate2.get_supported_compute_types("cpu"))
+    except Exception:  # noqa: BLE001 - fall through to the configured value
+        logger.debug("Could not query supported CPU compute types", exc_info=True)
+        return wanted
+    if wanted in supported:
+        return wanted
+    for candidate in ("int8", "int8_float32", "float32"):
+        if candidate in supported:
+            logger.warning(
+                "CPU does not support compute_type=%s; using %s instead",
+                wanted,
+                candidate,
+            )
+            return candidate
+    return wanted
+
+
+def _cpu_fallback_target() -> tuple[str, str]:
+    """Model and compute type to use when CUDA inference is not possible.
+
+    WHISPER_MODEL is sized for the GPU; running it on CPU is several times
+    slower than real time here, so the fallback uses a smaller multilingual
+    model unless CPU_FALLBACK_MODEL is cleared.
+    """
+
+    return settings.cpu_fallback_model or settings.whisper_model, _cpu_compute_type()
+
+
+def _build_model(name: str, device: str, compute_type: str) -> WhisperModel:
+    logger.info(
+        "Loading Whisper model %s device=%s compute_type=%s cpu_threads=%s",
+        name,
+        device,
+        compute_type,
+        settings.cpu_threads,
+    )
+    model_kwargs: dict[str, Any] = {"device": device, "compute_type": compute_type}
+    if settings.cpu_threads > 0:
+        model_kwargs["cpu_threads"] = settings.cpu_threads
+    return WhisperModel(name, **model_kwargs)
 
 
 def _update_model_last_used_sync() -> None:
@@ -502,52 +612,117 @@ def _update_model_last_used_sync() -> None:
     model_last_used = time.monotonic()
 
 
-def _load_model_sync() -> None:
-    """Load the Whisper model synchronously (safe to call from a thread).
+def _restore_model_last_used(value: float) -> None:
+    """Put the idle clock back, so a health probe cannot postpone the unload."""
 
-    Idempotent: will not reload if already loaded.
-    """
-    global model
-    if model is not None:
-        _update_model_last_used_sync()
-        return
-    logger.info(
-        "Loading Whisper model %s device=%s compute_type=%s cpu_threads=%s",
-        settings.whisper_model,
-        settings.device,
-        settings.compute_type,
-        settings.cpu_threads,
-    )
-    model_kwargs: dict[str, Any] = {
-        "device": settings.device,
-        "compute_type": settings.compute_type,
-    }
-    if settings.cpu_threads > 0:
-        model_kwargs["cpu_threads"] = settings.cpu_threads
-    model = WhisperModel(
-        settings.whisper_model,
-        **model_kwargs,
-    )
+    global model_last_used
+    model_last_used = value
+
+
+def _set_model(instance: WhisperModel, name: str, device: str, compute_type: str, *, fallback: bool) -> None:
+    global model, model_name, model_device, model_compute_type, model_cpu_fallback
+    model = instance
+    model_name = name
+    model_device = device
+    model_compute_type = compute_type
+    model_cpu_fallback = fallback
     _update_model_last_used_sync()
 
 
-def _unload_model_sync() -> None:
-    """Unload the Whisper model and free caches (best-effort)."""
-    global model
-    if model is None:
-        return
-    logger.info("Unloading Whisper model from memory due to idleness")
+def _load_model_sync() -> WhisperModel:
+    """Load the Whisper model synchronously (safe to call from a thread).
+
+    Idempotent: will not reload if already loaded. The GPU is shared with other
+    services, so a wake-up can land while another one holds the VRAM; when that
+    happens the model is loaded for CPU inference instead of failing the request.
+    """
+
+    with model_lock:
+        if model is not None:
+            _update_model_last_used_sync()
+            return model
+
+        device = _resolve_device()
+        name = settings.whisper_model
+        compute_type = _cpu_compute_type() if device == "cpu" else settings.compute_type
+
+        try:
+            instance = _build_model(name, device, compute_type)
+        except Exception as exc:
+            if not (settings.cuda_oom_fallback_cpu and device != "cpu" and _is_cuda_oom(exc)):
+                raise
+            name, compute_type = _cpu_fallback_target()
+            logger.warning(
+                "CUDA is out of memory; falling back to CPU inference with model=%s compute_type=%s (%s)",
+                name,
+                compute_type,
+                exc,
+            )
+            instance = _build_model(name, "cpu", compute_type)
+            _set_model(instance, name, "cpu", compute_type, fallback=True)
+            return instance
+
+        _set_model(instance, name, device, compute_type, fallback=False)
+        return instance
+
+
+def _reload_on_cpu_sync() -> WhisperModel:
+    """Drop the current model and load the CPU fallback in its place."""
+
+    with model_lock:
+        _unload_model_sync(force=True)
+        name, compute_type = _cpu_fallback_target()
+        instance = _build_model(name, "cpu", compute_type)
+        _set_model(instance, name, "cpu", compute_type, fallback=True)
+        return instance
+
+
+@contextlib.contextmanager
+def _model_in_use_guard():
+    """Keep the idle watcher from unloading a model that is being used."""
+
+    global model_in_use
+    with model_lock:
+        model_in_use += 1
     try:
-        # Remove reference to underlying implementation if present
-        impl = getattr(model, "model", None)
-        if impl is not None:
-            try:
-                del impl
-            except Exception:
-                pass
-    except Exception:
-        pass
-    model = None
+        yield
+    finally:
+        with model_lock:
+            model_in_use -= 1
+            _update_model_last_used_sync()
+
+
+def _run_with_cuda_fallback(run: Callable[[WhisperModel], T], *, what: str) -> T:
+    """Run `run` against the loaded model, retrying on CPU after a CUDA OOM.
+
+    CTranslate2 allocates lazily, so the GPU can still run out of memory well
+    after the model itself loaded.
+    """
+
+    with _model_in_use_guard():
+        instance = _load_model_sync()
+        try:
+            return run(instance)
+        except Exception as exc:
+            if not (settings.cuda_oom_fallback_cpu and model_device != "cpu" and _is_cuda_oom(exc)):
+                raise
+            logger.warning("CUDA is out of memory during %s; retrying on CPU (%s)", what, exc)
+            instance = _reload_on_cpu_sync()
+            return run(instance)
+
+
+def _unload_model_sync(*, force: bool = False) -> bool:
+    """Unload the Whisper model and free caches (best-effort)."""
+
+    global model
+    with model_lock:
+        if model is None:
+            return False
+        if model_in_use > 0 and not force:
+            return False
+        logger.info("Unloading Whisper model %s (device=%s) from memory", model_name, model_device)
+        model = None
+
     # Best-effort garbage collection and CUDA cache clear
     try:
         import gc
@@ -563,6 +738,7 @@ def _unload_model_sync() -> None:
     except Exception:
         # torch may not be installed in some environments
         pass
+    return True
 
 
 async def _model_idle_watcher() -> None:
@@ -573,7 +749,12 @@ async def _model_idle_watcher() -> None:
             if model is not None and settings.model_unload_seconds and settings.model_unload_seconds > 0:
                 idle = time.monotonic() - model_last_used
                 if idle >= settings.model_unload_seconds:
-                    await run_in_threadpool(_unload_model_sync)
+                    if await run_in_threadpool(_unload_model_sync):
+                        logger.info(
+                            "Whisper model unloaded after %.1fs idle (limit %.1fs)",
+                            idle,
+                            settings.model_unload_seconds,
+                        )
         except Exception:
             logger.exception("Model idle watcher encountered an error")
         await asyncio.sleep(poll_interval)
@@ -586,7 +767,7 @@ def _runtime_device() -> str:
         return settings.device
     impl = getattr(model, "model", None)
     actual = getattr(impl, "device", None) or getattr(model, "device", None)
-    return str(actual) if actual else settings.device
+    return str(actual) if actual else model_device
 
 
 def _format_uptime(seconds: float) -> str:
@@ -601,22 +782,45 @@ def _format_uptime(seconds: float) -> str:
 
 
 @app.get("/health")
-async def health() -> dict[str, float | str]:
+async def health(wake: Annotated[BoolArgument, Query()] = False) -> dict[str, float | str]:
+    """Report service health.
+
+    The probe transcribes a silent clip, which needs the model in memory. A
+    sleeping model is left asleep unless `wake=true` or HEALTH_WAKE_MODEL is
+    set, so that a health check running more often than MODEL_UNLOAD_SECONDS
+    does not keep the model resident forever.
+    """
+
     now = time.time()
-    try:
-        probe = await run_in_threadpool(_run_probe)
+    was_loaded = model is not None
+    probe: dict[str, float | str | int]
+    if was_loaded or wake or settings.health_wake_model:
+        idle_before = model_last_used
+        try:
+            probe = await run_in_threadpool(_run_probe)
+            status = "ok"
+        except Exception as exc:  # noqa: BLE001 - we want the message in health output
+            logger.exception("Health probe failed")
+            probe = {"probe_error": str(exc)}
+            status = "error"
+        if was_loaded:
+            # A probe of an already-loaded model must not postpone its unload.
+            _restore_model_last_used(idle_before)
+    else:
+        probe = {}
         status = "ok"
-    except Exception as exc:  # noqa: BLE001 - we want the message in health output
-        logger.exception("Health probe failed")
-        probe = {"probe_error": str(exc)}
-        status = "error"
 
     uptime_seconds = now - app_started_at
+    idle_seconds = time.monotonic() - model_last_used if model_last_used else 0.0
     return {
         "status": status,
-        "model": settings.whisper_model,
+        "model": model_name if model is not None else settings.whisper_model,
         "device": _runtime_device(),
-        "compute_type": settings.compute_type,
+        "compute_type": model_compute_type if model is not None else settings.compute_type,
+        "model_state": "loaded" if model is not None else "sleeping",
+        "cpu_fallback": str(model_cpu_fallback),
+        "model_unload_seconds": str(settings.model_unload_seconds),
+        "model_idle_seconds": f"{idle_seconds:.1f}",
         "vad_filter": str(settings.vad_filter),
         "cpu_threads": str(settings.cpu_threads),
         "log_level": settings.log_level.upper(),
