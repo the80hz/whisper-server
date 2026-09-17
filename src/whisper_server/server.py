@@ -760,11 +760,21 @@ async def _model_idle_watcher() -> None:
         await asyncio.sleep(poll_interval)
 
 
+def _model_was_loaded() -> bool:
+    """True once a model has been loaded, whether or not it is resident now."""
+
+    return model_last_used > 0.0
+
+
 def _runtime_device() -> str:
-    """Return the device actually chosen by faster-whisper."""
+    """Return the device actually chosen by faster-whisper.
+
+    While the model sleeps this reports the device of the last load rather than
+    the configured one, so a CPU fallback stays visible between requests.
+    """
 
     if model is None:
-        return settings.device
+        return model_device if _model_was_loaded() else settings.device
     impl = getattr(model, "model", None)
     actual = getattr(impl, "device", None) or getattr(model, "device", None)
     return str(actual) if actual else model_device
@@ -814,9 +824,9 @@ async def health(wake: Annotated[BoolArgument, Query()] = False) -> dict[str, fl
     idle_seconds = time.monotonic() - model_last_used if model_last_used else 0.0
     return {
         "status": status,
-        "model": model_name if model is not None else settings.whisper_model,
+        "model": model_name if _model_was_loaded() else settings.whisper_model,
         "device": _runtime_device(),
-        "compute_type": model_compute_type if model is not None else settings.compute_type,
+        "compute_type": model_compute_type if _model_was_loaded() else settings.compute_type,
         "model_state": "loaded" if model is not None else "sleeping",
         "cpu_fallback": str(model_cpu_fallback),
         "model_unload_seconds": str(settings.model_unload_seconds),

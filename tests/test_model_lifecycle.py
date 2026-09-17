@@ -241,3 +241,38 @@ def test_health_probe_does_not_postpone_the_unload(monkeypatch):
         client.get("/health")
 
     assert server.model_last_used == 1.0
+
+
+def test_health_reports_the_last_load_while_sleeping(monkeypatch):
+    """A CPU fallback has to stay visible after the model is unloaded."""
+
+    builds: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(server.settings, "device", "cuda")
+    monkeypatch.setattr(server.settings, "compute_type", "int8_float16")
+    monkeypatch.setattr(server.settings, "cpu_fallback_model", "small")
+    monkeypatch.setattr(server, "_cpu_compute_type", lambda: "int8")
+    monkeypatch.setattr(server, "_build_model", _builder(builds, fail_on_cuda=True))
+
+    with TestClient(server.app) as client:
+        server._load_model_sync()
+        server._unload_model_sync()
+        payload = client.get("/health").json()
+
+    assert payload["model_state"] == "sleeping"
+    assert payload["cpu_fallback"] == "True"
+    assert payload["device"] == "cpu"
+    assert payload["compute_type"] == "int8"
+    assert payload["model"] == "small"
+
+
+def test_health_reports_configuration_before_any_load(monkeypatch):
+    monkeypatch.setattr(server.settings, "device", "cuda")
+    monkeypatch.setattr(server.settings, "compute_type", "int8_float16")
+
+    with TestClient(server.app) as client:
+        server.model = None
+        server.model_last_used = 0.0
+        payload = client.get("/health").json()
+
+    assert payload["device"] == "cuda"
+    assert payload["compute_type"] == "int8_float16"
