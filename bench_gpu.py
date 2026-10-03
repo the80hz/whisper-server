@@ -41,10 +41,7 @@ def vram_total() -> str:
 
 
 print(f"Audio: {audio_path}")
-print(
-    f"{'Model':<20} {'compute':<16} {'Load':>10} "
-    f"{'Processing':>12} {'RTF':>7} {'VRAM (nvidia-smi)':>20}"
-)
+print(f"{'Model':<20} {'compute':<16} {'Load':>10} {'Processing':>12} {'RTF':>7} {'VRAM (nvidia-smi)':>20}")
 print("-" * 90)
 
 for model_name, compute_type in configs:

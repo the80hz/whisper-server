@@ -26,10 +26,7 @@ model_name = sys.argv[1] if len(sys.argv) > 1 else "small"
 audio_path = sys.argv[2] if len(sys.argv) > 2 else "test_for_bratishkabot.mp3"
 cpu_threads = int(sys.argv[3]) if len(sys.argv) > 3 else 2
 
-print(
-    f"ISA={os.environ['CT2_FORCE_CPU_ISA']} model={model_name} "
-    f"threads={cpu_threads} compute=int8 file={audio_path}"
-)
+print(f"ISA={os.environ['CT2_FORCE_CPU_ISA']} model={model_name} threads={cpu_threads} compute=int8 file={audio_path}")
 
 load_start = time.monotonic()
 model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=cpu_threads)

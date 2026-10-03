@@ -924,8 +924,10 @@ name = "whisper-server"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "av" },
     { name = "fastapi" },
     { name = "faster-whisper" },
+    { name = "numpy" },
     { name = "pydantic-settings" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
@@ -945,8 +947,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", specifier = ">=16.0.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "faster-whisper", specifier = ">=1.0.0" },
+    { name = "numpy", specifier = ">=2.3.5" },
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=12.4.0" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=9.1.0" },
     { name = "pydantic-settings", specifier = ">=2.6.0" },

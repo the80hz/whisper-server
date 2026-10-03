@@ -15,6 +15,8 @@ FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRA
 - Optional bearer-token authentication via `API_TOKEN`.
 - Backward-compatible `API_KEY` alias for older bratishkabot whisper deployments.
 - JSON, plain text, SRT, VTT, and verbose JSON responses.
+- Long recordings (up to 2 h / 500 MB by default) with a duration-based timeout.
+- Optional per-channel recognition of stereo files and vocabulary hints (`hotwords`).
 - Configurable via environment variables (`sample.env` provided).
 - Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
 
@@ -64,7 +66,7 @@ Environment variables (see `sample.env`):
 | `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
 | `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
-| `DEFAULT_TIMEOUT_SECONDS` | `180` | Per-request timeout when `timeout_seconds` is not provided. |
+| `DEFAULT_TIMEOUT_SECONDS` | `180` | Minimum per-request timeout when `timeout_seconds` is not provided; see `TIMEOUT_PER_AUDIO_SECOND`. |
 | `VAD_FILTER` | `true` | Enable faster-whisper VAD filtering before transcription. |
 | `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
 | `VAD_MIN_SILENCE_DURATION_MS` | `500` | Silence duration used to split speech regions. |
@@ -83,7 +85,9 @@ Environment variables (see `sample.env`):
 | `CUDA_OOM_FALLBACK_CPU` | `true` | Fall back to CPU inference when CUDA is out of memory. |
 | `CPU_FALLBACK_MODEL` | `small` | Model used by that fallback; empty keeps `WHISPER_MODEL`. |
 | `CPU_FALLBACK_COMPUTE_TYPE` | `int8` | Compute type for CPU runs; GPU-only types are not supported on CPU. |
-| `MAX_UPLOAD_MB` | `50` | Default upload size limit for `/transcribe`. |
+| `MAX_UPLOAD_MB` | `500` | Upload size limit for all transcription endpoints; larger files get `413`. |
+| `MAX_AUDIO_SECONDS` | `7500` | Longest accepted recording; longer audio gets `413`. |
+| `TIMEOUT_PER_AUDIO_SECOND` | `1.0` | The wait for a result is `max(DEFAULT_TIMEOUT_SECONDS, duration * TIMEOUT_PER_AUDIO_SECOND)`. |
 | `API_TOKEN` | unset | Optional bearer token required for all transcription endpoints when set. |
 | `API_KEY` | unset | Compatibility alias for `API_TOKEN`; `API_TOKEN` takes precedence. |
 
@@ -160,11 +164,34 @@ This endpoint is compatible with the current `bratishkabot` remote STT client:
 - `model`: accepted for compatibility; the server uses `WHISPER_MODEL`
 - `language`: optional language code hint, for example `ru` or `en`
 - `prompt`: optional initial prompt
+- `hotwords`: optional terms (clinic services, doctor names, drugs) separated by commas or
+  newlines, passed to faster-whisper `hotwords`; ignored with a
+  log warning on faster-whisper releases that lack the parameter
+- `channels`: `mix` (default) or `split`; see [Long recordings and stereo](#long-recordings-and-stereo)
+- `timestamp_granularities[]`: pass `word` to get `words` inside every segment
 - `response_format`: `json`, `text`, `srt`, `vtt`, or `verbose_json`
 - `temperature`: decoding temperature, default `0`
 - `timeout_seconds`: optional server-side timeout override
 
-`/v1/audio/translations` has the same shape and runs Whisper's `translate` task.
+`/v1/audio/translations` has the same shape (without `hotwords`, `channels` and `timestamp_granularities[]`)
+and runs Whisper's `translate` task.
+
+`verbose_json` response:
+
+```json
+{"task": "transcribe", "language": "ru", "duration": 123.4, "text": "...",
+ "model": "large-v3-turbo", "channels": 2, "channel_mode": "split",
+ "segments": [{"id": 0, "start": 0.0, "end": 2.1, "text": "...", "avg_logprob": -0.2,
+               "compression_ratio": 1.1, "no_speech_prob": 0.01, "channel": 0,
+               "words": [{"start": 0.0, "end": 0.4, "word": "...", "probability": 0.9}]}],
+ "words": [{"start": 0.0, "end": 0.4, "word": "...", "probability": 0.9}]}
+```
+
+- `model` is the model that actually ran (the CPU fallback model after a CUDA out-of-memory error).
+- `channels` is the channel count of the file, `channel_mode` echoes the request.
+- `channel` is present on every segment when `channel_mode` is `split`.
+- Segment `words` appear only with `timestamp_granularities[]=word`. The top-level `words` list is
+  kept for compatibility and is returned for every `verbose_json` request, as before.
 
 Examples:
 
@@ -184,6 +211,50 @@ curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
   -F "model=whisper-1" \
   -F "response_format=srt"
 ```
+
+## Long Recordings and Stereo
+
+faster-whisper decodes long audio in 30 s windows, so a 2 h file needs no manual chunking. What
+had to change were the limits:
+
+- **Upload.** The body is spooled to disk and never held in memory. A request whose
+  `Content-Length` exceeds `MAX_UPLOAD_MB` is refused with `413` before the body is received; the
+  size is checked again while the file is copied. Expect roughly twice the upload size in
+  temporary disk space while a request is in flight.
+- **Duration.** The header duration is probed after the upload. Audio longer than
+  `MAX_AUDIO_SECONDS` is refused with `413`.
+- **Timeout.** The wait for a result is `max(DEFAULT_TIMEOUT_SECONDS, duration * TIMEOUT_PER_AUDIO_SECOND)`.
+  It includes time spent in the queue. An explicit `timeout_seconds` still wins. If the header
+  cannot be probed, `DEFAULT_TIMEOUT_SECONDS` applies.
+- **Memory.** faster-whisper decodes the whole file to 16 kHz float32, about 460 MB for 2 h of mono
+  audio. `channels=split` holds every channel at once, so a 2 h stereo file needs about 1 GB of RAM.
+
+`channels=split` transcribes each channel of a stereo file separately, which gives the speaker role
+from the channel without diarization:
+
+- Every segment gets `channel` (0-based), and segments of all channels are merged into one list
+  sorted by `start`; `id` is the position in that list.
+- A mono file is one channel (`channel: 0`), not an error. Files with more than two channels are
+  split into one run per channel.
+- When `language` is not given, it is detected on channel 0 and reused for the other channels.
+- Channels run one after another, so `split` takes about as long as the channels' total duration.
+- `mix` (default) keeps the old behaviour: the file is downmixed and `channel` is omitted.
+
+```bash
+curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
+  -H "Authorization: Bearer ${API_TOKEN}" \
+  -F "file=@call.mp3" \
+  -F "language=ru" \
+  -F "response_format=verbose_json" \
+  -F "channels=split" \
+  -F "hotwords=Ivanov, laser dentistry" \
+  -F "timestamp_granularities[]=word"
+```
+
+The `/transcribe` endpoint is unchanged apart from three additive top-level fields in its response
+(`model`, `channels`, `channel_mode`).
+
+Not verified on a real 2 h / 500 MB file; run one on the target GPU before relying on the limits.
 
 ## Docker & Compose
 
@@ -248,12 +319,13 @@ For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call 
 └── src/
     └── whisper_server/
         ├── __init__.py
+        ├── audio.py
         ├── config.py
         └── server.py
 ```
 
 ## Development Notes
 
-- Linting: `uv run ruff check .`
+- Formatting and linting: `uv run ruff format .` and `uv run ruff check .` (line length 120)
 - Tests: `uv run pytest`
 - Use `uv lock` to generate a lockfile if you need a deterministic dependency snapshot.

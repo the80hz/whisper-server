@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import array
 import contextlib
+import inspect
 import logging
 import os
 import secrets
@@ -20,12 +21,25 @@ from math import isfinite
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from faster_whisper.tokenizer import _LANGUAGE_CODES
 from pydantic import BeforeValidator
 
+from .audio import AudioInfo, decode_channels, probe_audio
 from .config import settings
 
 log_path = Path(settings.log_file).expanduser()
@@ -45,11 +59,28 @@ app_started_at = time.time()
 transcription_queue: asyncio.Queue["TranscriptionJob"] = asyncio.Queue(maxsize=settings.queue_max_size)
 worker_task: asyncio.Task[None] | None = None
 ResponseFormat = Literal["json", "text", "srt", "verbose_json", "vtt"]
+ChannelMode = Literal["mix", "split"]
+UPLOAD_PATHS = frozenset({"/transcribe", "/v1/audio/transcriptions", "/v1/audio/translations"})
+# Multipart framing and the non-file form fields on top of the file itself.
+UPLOAD_OVERHEAD_BYTES = 1024 * 1024
+# `hotwords` arrived in faster-whisper 1.0.3; the manifest allows older releases.
+HOTWORDS_SUPPORTED = "hotwords" in inspect.signature(WhisperModel.transcribe).parameters
 
 
 def _argument_default(name: str, value: Any, default: Any) -> Any:
     logger.warning("Invalid request argument %s=%r; using default %r", name, value, default)
     return default
+
+
+def _hotwords_text(value: str | None) -> str | None:
+    """Normalise comma- or newline-separated terms into faster-whisper's hotwords string."""
+
+    terms = [term.strip() for term in (value or "").replace("\n", ",").split(",")]
+    return ", ".join(term for term in terms if term) or None
+
+
+def _wants_word_granularity(*groups: list[str] | None) -> bool:
+    return any(item.strip().lower() == "word" for group in groups for item in group or [])
 
 
 def _valid_task(value: Any) -> str:
@@ -66,6 +97,11 @@ def _valid_language(value: Any) -> str | None:
         return None
     normalized = str(value).lower().strip()
     return normalized if normalized in _LANGUAGE_CODES else _argument_default("language", value, None)
+
+
+def _valid_channels(value: Any) -> str:
+    normalized = str(value).lower().strip()
+    return normalized if normalized in {"mix", "split"} else _argument_default("channels", value, "mix")
 
 
 def _valid_bool_argument(value: Any) -> bool:
@@ -100,6 +136,7 @@ def _valid_timeout(value: Any) -> float | None:
 TaskArgument = Annotated[Literal["transcribe", "translate"], BeforeValidator(_valid_task)]
 ResponseFormatArgument = Annotated[ResponseFormat, BeforeValidator(_valid_response_format)]
 LanguageArgument = Annotated[str | None, BeforeValidator(_valid_language)]
+ChannelsArgument = Annotated[ChannelMode, BeforeValidator(_valid_channels)]
 BoolArgument = Annotated[bool, BeforeValidator(_valid_bool_argument)]
 TemperatureArgument = Annotated[float, BeforeValidator(_valid_temperature)]
 TimeoutArgument = Annotated[float | None, BeforeValidator(_valid_timeout)]
@@ -127,6 +164,12 @@ class TranscriptionJob:
     initial_prompt: str | None
     temperature: float
     future: asyncio.Future[dict[str, Any]]
+    hotwords: str | None = None
+    channel_mode: ChannelMode = "mix"
+    # Attach `words` to every segment (OpenAI `timestamp_granularities[]=word`).
+    segment_words: bool = False
+    # Channel count from the container header; None when the probe failed.
+    audio_channels: int | None = None
 
 
 def _ensure_health_clip() -> Path:
@@ -170,18 +213,26 @@ def _run_probe() -> dict[str, float | str | int]:
     }
 
 
-def _collect_segments(instance: WhisperModel, job: TranscriptionJob) -> tuple[list[Any], Any]:
-    """Decode `job` with `instance`, logging progress as segments arrive."""
+def _decode_segments(
+    instance: WhisperModel,
+    audio: Any,
+    job: TranscriptionJob,
+    *,
+    channel: int | None,
+    language: str | None,
+) -> tuple[list[Any], Any]:
+    """Decode one audio input, logging progress as segments arrive."""
 
+    label = job.filename if channel is None else f"{job.filename} channel {channel}"
     started = time.monotonic()
-    segments_iter, info = instance.transcribe(job.audio_path, **_transcription_options(job))
+    segments_iter, info = instance.transcribe(audio, **_transcription_options(job, language=language))
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     logger.info(
         "Transcription started for %s: duration=%.2fs task=%s language=%s",
-        job.filename,
+        label,
         duration,
         job.task,
-        job.language or "auto",
+        language or "auto",
     )
 
     segments = []
@@ -199,7 +250,7 @@ def _collect_segments(instance: WhisperModel, job: TranscriptionJob) -> tuple[li
         if should_log_percent or should_log_interval:
             logger.info(
                 "Transcription progress for %s: %.1f%% audio=%.2fs/%.2fs segments=%d elapsed=%.2fs",
-                job.filename,
+                label,
                 progress_percent,
                 segment_end,
                 duration,
@@ -213,14 +264,47 @@ def _collect_segments(instance: WhisperModel, job: TranscriptionJob) -> tuple[li
     return segments, info
 
 
+def _collect_segments(
+    instance: WhisperModel, job: TranscriptionJob
+) -> tuple[list[tuple[int | None, Any]], Any, int | None]:
+    """Decode `job` with `instance`; returns (channel, segment) pairs, info, channel count.
+
+    `mix` hands the file to faster-whisper, which downmixes it. `split` decodes each
+    channel to its own array and transcribes them one after another.
+    """
+
+    if job.channel_mode != "split":
+        segments, info = _decode_segments(instance, job.audio_path, job, channel=None, language=job.language)
+        return [(None, segment) for segment in segments], info, job.audio_channels
+
+    channels = decode_channels(job.audio_path)
+    language = job.language
+    merged: list[tuple[int | None, Any]] = []
+    info: Any = None
+    for index, samples in enumerate(channels):
+        segments, channel_info = _decode_segments(instance, samples, job, channel=index, language=language)
+        # Pin the language detected on the first channel: a quiet channel would
+        # otherwise detect noise and the call would come back in mixed languages.
+        if info is None:
+            info = channel_info
+            language = language or getattr(channel_info, "language", None)
+        merged.extend((index, segment) for segment in segments)
+    if info is None:
+        raise ValueError(f"No audio channels found in {job.filename}")
+    merged.sort(key=lambda pair: (pair[1].start, pair[0]))
+    return merged, info, len(channels)
+
+
 def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
-    segments, info = _run_with_cuda_fallback(
+    pairs, info, channels = _run_with_cuda_fallback(
         lambda instance: _collect_segments(instance, job),
         what=f"transcription of {job.filename}",
     )
+    segments = [segment for _, segment in pairs]
     text = "".join(segment.text for segment in segments)
-    segment_details = [
-        {
+    segment_details = []
+    for index, (channel, segment) in enumerate(pairs):
+        detail: dict[str, Any] = {
             "id": index,
             "start": segment.start,
             "end": segment.end,
@@ -229,8 +313,11 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
             "compression_ratio": getattr(segment, "compression_ratio", None),
             "no_speech_prob": getattr(segment, "no_speech_prob", None),
         }
-        for index, segment in enumerate(segments)
-    ]
+        if channel is not None:
+            detail["channel"] = channel
+        if job.segment_words:
+            detail["words"] = _word_details(segment)
+        segment_details.append(detail)
 
     payload: dict[str, Any] = {
         "text": text,
@@ -239,22 +326,28 @@ def _transcribe_file(job: TranscriptionJob) -> dict[str, Any]:
         "segment_details": segment_details,
         "language": getattr(info, "language", None),
         "task": job.task,
+        "model": model_name,
+        "channels": channels,
+        "channel_mode": job.channel_mode,
     }
     if job.word_timestamps:
-        payload["words"] = [
-            {
-                "word": word.word,
-                "start": word.start,
-                "end": word.end,
-                "probability": word.probability,
-            }
-            for segment in segments
-            for word in (segment.words or [])
-        ]
+        payload["words"] = [word for segment in segments for word in _word_details(segment)]
     return payload
 
 
-def _transcription_options(job: TranscriptionJob) -> dict[str, Any]:
+def _word_details(segment: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "word": word.word,
+            "start": word.start,
+            "end": word.end,
+            "probability": word.probability,
+        }
+        for word in (segment.words or [])
+    ]
+
+
+def _transcription_options(job: TranscriptionJob, *, language: str | None = None) -> dict[str, Any]:
     """Build faster-whisper options with safeguards against repetition loops."""
 
     temperature: float | tuple[float, ...] = job.temperature
@@ -266,8 +359,8 @@ def _transcription_options(job: TranscriptionJob) -> dict[str, Any]:
     detect_silence_hallucinations = settings.hallucination_silence_threshold > 0
     options: dict[str, Any] = {
         "task": job.task,
-        "language": job.language,
-        "word_timestamps": job.word_timestamps or detect_silence_hallucinations,
+        "language": language or job.language,
+        "word_timestamps": job.word_timestamps or job.segment_words or detect_silence_hallucinations,
         "initial_prompt": job.initial_prompt,
         "temperature": temperature,
         "vad_filter": settings.vad_filter,
@@ -284,6 +377,11 @@ def _transcription_options(job: TranscriptionJob) -> dict[str, Any]:
             "min_silence_duration_ms": settings.vad_min_silence_duration_ms,
             "speech_pad_ms": settings.vad_speech_pad_ms,
         }
+    if job.hotwords:
+        if HOTWORDS_SUPPORTED:
+            options["hotwords"] = job.hotwords
+        else:
+            logger.warning("Ignoring hotwords: the installed faster-whisper does not support them")
     if detect_silence_hallucinations:
         options["hallucination_silence_threshold"] = settings.hallucination_silence_threshold
     return options
@@ -330,6 +428,9 @@ def _openai_payload(result: dict[str, Any], response_format: ResponseFormat) -> 
             "language": result["language"],
             "duration": result["duration"],
             "text": result["text"],
+            "model": result.get("model"),
+            "channels": result.get("channels"),
+            "channel_mode": result.get("channel_mode", "mix"),
             "segments": result["segment_details"],
         }
         if "words" in result:
@@ -365,12 +466,44 @@ def _check_auth(authorization: str | None = Header(default=None)) -> None:
         )
 
 
+def _max_upload_bytes() -> int:
+    return int(settings.max_upload_mb * 1024 * 1024)
+
+
+def _too_large_detail(max_bytes: int) -> str:
+    return f"File is too large. Limit is {(max_bytes / 1024 / 1024):.2f} MB"
+
+
+@app.middleware("http")
+async def _reject_oversized_upload(request: Request, call_next):
+    """Refuse an oversized upload from its Content-Length before the body is received.
+
+    Starlette parses the whole multipart body to disk before a handler runs, so the
+    streaming check in `_save_upload` alone would only fire after a huge transfer.
+    """
+
+    if request.method == "POST" and request.url.path in UPLOAD_PATHS:
+        try:
+            declared = int(request.headers.get("content-length", ""))
+        except ValueError:
+            declared = 0
+        max_bytes = _max_upload_bytes()
+        if declared > max_bytes + UPLOAD_OVERHEAD_BYTES:
+            logger.warning(
+                "Rejected upload: Content-Length=%d exceeds limit of %d bytes",
+                declared,
+                max_bytes,
+            )
+            return JSONResponse(status_code=413, content={"detail": _too_large_detail(max_bytes)})
+    return await call_next(request)
+
+
 async def _save_upload(file: UploadFile) -> str:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must include a filename")
 
     suffix = Path(file.filename).suffix or ".tmp"
-    max_bytes = int(settings.max_upload_mb * 1024 * 1024)
+    max_bytes = _max_upload_bytes()
     total_bytes = 0
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -382,16 +515,40 @@ async def _save_upload(file: UploadFile) -> str:
                     break
                 total_bytes += len(chunk)
                 if total_bytes > max_bytes:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File is too large. Limit is {(max_bytes / 1024 / 1024):.2f} MB",
-                    )
-                tmp_file.write(chunk)
+                    raise HTTPException(status_code=413, detail=_too_large_detail(max_bytes))
+                await run_in_threadpool(tmp_file.write, chunk)
         except Exception:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(audio_path)
             raise
     return audio_path
+
+
+async def _inspect_audio(audio_path: str, *, filename: str) -> AudioInfo:
+    """Probe the saved upload and enforce the duration limit.
+
+    An unreadable header is not fatal here: the worker reports the decode error as before.
+    """
+
+    try:
+        info = await run_in_threadpool(probe_audio, audio_path)
+    except Exception:  # noqa: BLE001 - the worker surfaces real decode failures
+        logger.warning("Could not probe %s; using the default timeout", filename, exc_info=True)
+        return AudioInfo(duration=None, channels=None)
+    if info.duration is not None and info.duration > settings.max_audio_seconds:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"Audio is too long ({info.duration:.0f}s). Limit is {settings.max_audio_seconds:.0f}s"),
+        )
+    return info
+
+
+def _wait_timeout(duration: float | None) -> float:
+    """Default result wait: grows with the audio, never below DEFAULT_TIMEOUT_SECONDS."""
+
+    if duration is None:
+        return settings.default_timeout_seconds
+    return max(settings.default_timeout_seconds, duration * settings.timeout_per_audio_second)
 
 
 async def _enqueue_transcription(
@@ -403,12 +560,22 @@ async def _enqueue_transcription(
     timeout_seconds: float | None,
     initial_prompt: str | None = None,
     temperature: float = 0.0,
+    hotwords: str | None = None,
+    channel_mode: ChannelMode = "mix",
+    segment_words: bool = False,
 ) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must include a filename")
 
     logger.info("Received file %s", file.filename)
     audio_path = await _save_upload(file)
+
+    try:
+        audio_info = await _inspect_audio(audio_path, filename=file.filename)
+    except HTTPException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(audio_path)
+        raise
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -421,6 +588,10 @@ async def _enqueue_transcription(
         initial_prompt=initial_prompt,
         temperature=temperature,
         future=future,
+        hotwords=hotwords,
+        channel_mode=channel_mode,
+        segment_words=segment_words,
+        audio_channels=audio_info.channels,
     )
     try:
         transcription_queue.put_nowait(job)
@@ -429,7 +600,7 @@ async def _enqueue_transcription(
             os.unlink(audio_path)
         raise HTTPException(status_code=429, detail="Transcription queue is full. Try again later.") from None
 
-    wait_timeout = timeout_seconds or settings.default_timeout_seconds
+    wait_timeout = timeout_seconds or _wait_timeout(audio_info.duration)
     try:
         result = await asyncio.wait_for(asyncio.shield(future), timeout=wait_timeout)
         result["queue_position_left"] = transcription_queue.qsize()
@@ -499,6 +670,7 @@ async def _shutdown_worker() -> None:
         await run_in_threadpool(lambda: _unload_model_sync(force=True))
     except Exception:
         logger.exception("Failed to unload Whisper model at shutdown")
+
 
 # Model instance and idle-unload management.
 # The model is loaded at startup (to keep previous behaviour) and may be
@@ -720,7 +892,11 @@ def _unload_model_sync(*, force: bool = False) -> bool:
             return False
         if model_in_use > 0 and not force:
             return False
-        logger.info("Unloading Whisper model %s (device=%s) from memory", model_name, model_device)
+        logger.info(
+            "Unloading Whisper model %s (device=%s) from memory",
+            model_name,
+            model_device,
+        )
         model = None
 
     # Best-effort garbage collection and CUDA cache clear
@@ -792,7 +968,9 @@ def _format_uptime(seconds: float) -> str:
 
 
 @app.get("/health")
-async def health(wake: Annotated[BoolArgument, Query()] = False) -> dict[str, float | str]:
+async def health(
+    wake: Annotated[BoolArgument, Query()] = False,
+) -> dict[str, float | str]:
     """Report service health.
 
     The probe transcribes a silent clip, which needs the model in memory. A
@@ -867,13 +1045,23 @@ async def openai_audio_transcriptions(
     model: str = Form(default="whisper-1"),
     language: Annotated[LanguageArgument, Form()] = None,
     prompt: str | None = Form(default=None),
+    hotwords: str | None = Form(default=None),
+    channels: Annotated[ChannelsArgument, Form()] = "mix",
     response_format: Annotated[ResponseFormatArgument, Form()] = "json",
     temperature: Annotated[TemperatureArgument, Form()] = 0.0,
     timeout_seconds: Annotated[TimeoutArgument, Form()] = None,
+    timestamp_granularities: list[str] | None = Form(default=None, alias="timestamp_granularities[]"),
+    timestamp_granularities_plain: list[str] | None = Form(default=None, alias="timestamp_granularities"),
 ) -> Any:
     if model not in {"whisper-1", settings.whisper_model}:
-        logger.info("Ignoring OpenAI-compatible model=%s; using configured model=%s", model, settings.whisper_model)
+        logger.info(
+            "Ignoring OpenAI-compatible model=%s; using configured model=%s",
+            model,
+            settings.whisper_model,
+        )
 
+    # Without `timestamp_granularities[]` verbose_json keeps its historical shape:
+    # top-level `words` only. Asking for `word` adds `words` to every segment too.
     word_timestamps = response_format == "verbose_json"
     result = await _enqueue_transcription(
         file=file,
@@ -883,6 +1071,10 @@ async def openai_audio_transcriptions(
         timeout_seconds=timeout_seconds,
         initial_prompt=prompt,
         temperature=temperature,
+        hotwords=_hotwords_text(hotwords),
+        channel_mode=channels,
+        segment_words=word_timestamps
+        and _wants_word_granularity(timestamp_granularities, timestamp_granularities_plain),
     )
     payload = _openai_payload(result, response_format)
     if isinstance(payload, str):
@@ -901,7 +1093,11 @@ async def openai_audio_translations(
     timeout_seconds: Annotated[TimeoutArgument, Form()] = None,
 ) -> Any:
     if model not in {"whisper-1", settings.whisper_model}:
-        logger.info("Ignoring OpenAI-compatible model=%s; using configured model=%s", model, settings.whisper_model)
+        logger.info(
+            "Ignoring OpenAI-compatible model=%s; using configured model=%s",
+            model,
+            settings.whisper_model,
+        )
 
     word_timestamps = response_format == "verbose_json"
     result = await _enqueue_transcription(

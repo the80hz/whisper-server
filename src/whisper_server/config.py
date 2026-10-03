@@ -44,7 +44,13 @@ class Settings(BaseSettings):
     # Compute type for any CPU run. GPU-only types such as int8_float16 are not
     # supported by CTranslate2 on CPU.
     cpu_fallback_compute_type: str = "int8"
-    max_upload_mb: float = 50.0
+    # Upload size cap. 500 MB covers a 2 h call recorded as WAV or MP3.
+    max_upload_mb: float = 500.0
+    # Longest accepted recording; longer audio is rejected with 413.
+    max_audio_seconds: float = 7500.0
+    # The wait for a result is max(DEFAULT_TIMEOUT_SECONDS, duration * this value),
+    # so a long recording is not cut off by the short default.
+    timeout_per_audio_second: float = 1.0
     api_token: str | None = None
     # Backward-compatible alias used by bratishkabot-whisper-server.
     # If API_TOKEN is set, it takes precedence over API_KEY.
@@ -146,6 +152,8 @@ class Settings(BaseSettings):
         "repetition_penalty",
         "compression_ratio_threshold",
         "max_upload_mb",
+        "max_audio_seconds",
+        "timeout_per_audio_second",
         mode="before",
     )
     @classmethod

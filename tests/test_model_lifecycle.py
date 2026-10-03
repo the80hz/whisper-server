@@ -43,9 +43,7 @@ def test_cpu_compute_type_downgrades_gpu_only_type(monkeypatch):
     import ctranslate2
 
     monkeypatch.setattr(server.settings, "cpu_fallback_compute_type", "int8_float16")
-    monkeypatch.setattr(
-        ctranslate2, "get_supported_compute_types", lambda device: {"float32", "int8", "int8_float32"}
-    )
+    monkeypatch.setattr(ctranslate2, "get_supported_compute_types", lambda device: {"float32", "int8", "int8_float32"})
 
     assert server._cpu_compute_type() == "int8"
 
@@ -54,9 +52,7 @@ def test_cpu_compute_type_keeps_supported_type(monkeypatch):
     import ctranslate2
 
     monkeypatch.setattr(server.settings, "cpu_fallback_compute_type", "int8")
-    monkeypatch.setattr(
-        ctranslate2, "get_supported_compute_types", lambda device: {"float32", "int8", "int8_float32"}
-    )
+    monkeypatch.setattr(ctranslate2, "get_supported_compute_types", lambda device: {"float32", "int8", "int8_float32"})
 
     assert server._cpu_compute_type() == "int8"
 
