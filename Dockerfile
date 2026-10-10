@@ -3,11 +3,15 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm AS build
 WORKDIR /app
 
 ARG INSTALL_GPU=false
+# The GigaAM engine: torch brings its own CUDA libraries, so it replaces INSTALL_GPU.
+ARG INSTALL_GIGAAM=false
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN if [ "$INSTALL_GPU" = "true" ]; then \
+RUN if [ "$INSTALL_GIGAAM" = "true" ]; then \
+        uv sync --frozen --no-dev --extra gigaam; \
+    elif [ "$INSTALL_GPU" = "true" ]; then \
         uv sync --frozen --no-dev --extra gpu; \
     else \
         uv sync --frozen --no-dev; \

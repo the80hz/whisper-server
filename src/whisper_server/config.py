@@ -12,11 +12,22 @@ logger = logging.getLogger("whisper-api.config")
 class Settings(BaseSettings):
     port: int = 3373
     whisper_model: str = "large-v3-turbo"
+    # Which recogniser serves the requests: faster-whisper or GigaAM (optional extra `gigaam`).
+    engine: str = "whisper"
+    # GigaAM model name; `v3_e2e_rnnt` writes punctuation and gives word timestamps.
+    gigaam_model: str = "v3_e2e_rnnt"
+    # Where GigaAM keeps its weights. Empty means ~/.cache/gigaam.
+    gigaam_download_root: str = ""
+    # Chunks of one recording that go through GigaAM together.
+    gigaam_batch_size: int = 16
     log_level: str = "INFO"
     device: str = "auto"
     compute_type: str = "int8"
     log_file: str = "logs/whisper.log"
     queue_max_size: int = 8
+    # Recordings transcribed at the same time. One GPU model serves all of them
+    # (CTranslate2 `num_workers`); each takes its own share of VRAM while it runs.
+    transcribe_workers: int = 1
     default_timeout_seconds: float = 180.0
     vad_filter: bool = True
     vad_threshold: float = 0.5
@@ -72,6 +83,12 @@ class Settings(BaseSettings):
     def _valid_device(cls, value: Any, info: ValidationInfo) -> str:
         normalized = str(value).lower().strip()
         return normalized if normalized in {"auto", "cpu", "cuda"} else cls._default(info, value)
+
+    @field_validator("engine", mode="before")
+    @classmethod
+    def _valid_engine(cls, value: Any, info: ValidationInfo) -> str:
+        normalized = str(value).lower().strip()
+        return normalized if normalized in {"whisper", "gigaam"} else cls._default(info, value)
 
     @field_validator("compute_type", "cpu_fallback_compute_type", mode="before")
     @classmethod

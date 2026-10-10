@@ -61,11 +61,16 @@ Environment variables (see `sample.env`):
 | --- | --- | --- |
 | `PORT` | `3373` | Port exposed by uvicorn and Docker image. |
 | `WHISPER_MODEL` | `large-v3-turbo` | Model name accepted by faster-whisper. |
+| `ENGINE` | `whisper` | Recogniser behind the API: `whisper` (faster-whisper) or `gigaam` (GigaAM-v3, Russian only; see below). |
+| `GIGAAM_MODEL` | `v3_e2e_rnnt` | GigaAM model name, used when `ENGINE=gigaam`. |
+| `GIGAAM_DOWNLOAD_ROOT` | empty | Directory with GigaAM weights; empty means `~/.cache/gigaam`. They are downloaded on first start. |
+| `GIGAAM_BATCH_SIZE` | `16` | Chunks of one recording that go through GigaAM together. |
 | `LOG_LEVEL` | `INFO` | Root logging verbosity. |
 | `LOG_FILE` | `logs/whisper.log` | Path for persistent application logs (directory created automatically). |
 | `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
 | `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
 | `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
+| `TRANSCRIBE_WORKERS` | `1` | Recordings transcribed at the same time by one loaded model. Raise it on a GPU with spare VRAM and CPU cores; each running transcription takes its own share of VRAM. |
 | `DEFAULT_TIMEOUT_SECONDS` | `180` | Minimum per-request timeout when `timeout_seconds` is not provided; see `TIMEOUT_PER_AUDIO_SECOND`. |
 | `VAD_FILTER` | `true` | Enable faster-whisper VAD filtering before transcription. |
 | `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
@@ -256,6 +261,46 @@ The `/transcribe` endpoint is unchanged apart from three additive top-level fiel
 
 Not verified on a real 2 h / 500 MB file; run one on the target GPU before relying on the limits.
 
+## Parallel Transcription
+
+By default recordings are transcribed one after another. `TRANSCRIBE_WORKERS=N` lets N
+of them run at the same time against one loaded model; the queue (`QUEUE_MAX_SIZE`) holds
+what is waiting beyond that. Each running transcription takes its own share of VRAM and a
+CPU core for decoding the audio, so raise the number on a GPU that sits idle, not on one
+that is full. `/health` reports the value as `transcribe_workers`.
+
+## GigaAM Engine
+
+`ENGINE=gigaam` serves the same API with [GigaAM-v3](https://github.com/salute-developers/GigaAM)
+(MIT, Russian only) instead of Whisper. The queue, the workers, the upload limits, the
+channel split and every response format work the same way; the response carries
+`model: v3_e2e_rnnt`.
+
+What differs:
+
+- The model takes up to 25 s at once, so a recording is cut by Silero VAD into chunks at
+  pauses, the chunks go through the model in batches (`GIGAAM_BATCH_SIZE`), and each chunk
+  is split into phrases at the pauses between its words. Music on hold does not swallow the
+  speech next to it, which Whisper is prone to.
+- There is no text input: `hotwords`, `prompt`, `temperature` and `language` are accepted
+  and ignored. Rare surnames and drug names come out worse than from Whisper with hotwords.
+- Words have no `probability`, segments no `avg_logprob`.
+- A dialogue dash the model writes as a separate token is dropped: it is not a word.
+- On a CUDA out-of-memory error the same model is reloaded on CPU; there is no smaller one.
+
+The packages are an optional extra, because they bring torch:
+
+```bash
+uv sync --extra gigaam          # not together with --extra gpu
+ENGINE=gigaam uv run uvicorn whisper_server.server:app --port 3373
+
+docker build --build-arg INSTALL_GIGAAM=true -t whisper-server:gigaam .
+docker run --gpus all -e ENGINE=gigaam -v ./gigaam-cache:/root/.cache/gigaam -p 3373:3373 whisper-server:gigaam
+```
+
+Decoding is a Python loop, so past a few `TRANSCRIBE_WORKERS` the threads wait for each
+other; run several containers, or `uvicorn --workers N`, for more.
+
 ## Docker & Compose
 
 Build and run with Docker:
@@ -300,7 +345,7 @@ The GPU image must contain `nvidia-cudnn-cu12`. If CUDA crashes with a missing
 GitHub Actions builds both variants on pull requests. Pushes to `main` publish
 multi-architecture images to the GitHub Container Registry as
 `ghcr.io/the80hz/whisper-api:latest` for CPU and `ghcr.io/the80hz/whisper-api:gpu`
-for CUDA. No registry secrets are needed: the workflow authenticates with the
+for CUDA, and the x86-64 image `ghcr.io/the80hz/whisper-api:gigaam` with the GigaAM engine. No registry secrets are needed: the workflow authenticates with the
 built-in `GITHUB_TOKEN` and `packages: write`, and the package inherits this
 repository's visibility, so the images pull anonymously.
 
@@ -320,7 +365,9 @@ For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call 
     └── whisper_server/
         ├── __init__.py
         ├── audio.py
+        ├── chunking.py
         ├── config.py
+        ├── gigaam_engine.py
         └── server.py
 ```
 

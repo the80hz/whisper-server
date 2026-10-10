@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar, cast
 
 from fastapi import (
     Depends,
@@ -57,7 +57,7 @@ logger = logging.getLogger("whisper-api")
 
 app_started_at = time.time()
 transcription_queue: asyncio.Queue["TranscriptionJob"] = asyncio.Queue(maxsize=settings.queue_max_size)
-worker_task: asyncio.Task[None] | None = None
+worker_tasks: list[asyncio.Task[None]] = []
 ResponseFormat = Literal["json", "text", "srt", "verbose_json", "vtt"]
 ChannelMode = Literal["mix", "split"]
 UPLOAD_PATHS = frozenset({"/transcribe", "/v1/audio/transcriptions", "/v1/audio/translations"})
@@ -640,8 +640,7 @@ async def _transcription_worker() -> None:
 
 
 async def _startup_worker() -> None:
-    global worker_task
-    worker_task = asyncio.create_task(_transcription_worker())
+    worker_tasks.extend(asyncio.create_task(_transcription_worker()) for _ in range(_transcribe_workers()))
     # Load model at startup to preserve previous eager-loading behaviour
     try:
         await run_in_threadpool(_load_model_sync)
@@ -655,11 +654,12 @@ async def _startup_worker() -> None:
 
 
 async def _shutdown_worker() -> None:
-    if worker_task is None:
+    if not worker_tasks:
         return
-    worker_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await worker_task
+    for task in worker_tasks:
+        task.cancel()
+    await asyncio.gather(*worker_tasks, return_exceptions=True)
+    worker_tasks.clear()
     # Stop model watcher and unload model
     global model_watcher_task
     if model_watcher_task is not None:
@@ -718,11 +718,27 @@ def _cuda_device_count() -> int:
         return 0
 
 
+def _torch_sees_cuda() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 - treated as "no usable GPU"
+        logger.debug("Could not ask torch about CUDA", exc_info=True)
+        return False
+
+
+def _configured_model() -> str:
+    return settings.gigaam_model if settings.engine == "gigaam" else settings.whisper_model
+
+
 def _resolve_device() -> str:
     """Resolve DEVICE=auto to the device faster-whisper would pick itself."""
 
     if settings.device != "auto":
         return settings.device
+    if settings.engine == "gigaam":
+        return "cuda" if _torch_sees_cuda() else "cpu"
     return "cuda" if _cuda_device_count() > 0 else "cpu"
 
 
@@ -762,10 +778,31 @@ def _cpu_fallback_target() -> tuple[str, str]:
     model unless CPU_FALLBACK_MODEL is cleared.
     """
 
+    if settings.engine == "gigaam":
+        # GigaAM has no smaller sibling to fall back to: the same model, slower.
+        return settings.gigaam_model, _cpu_compute_type()
     return settings.cpu_fallback_model or settings.whisper_model, _cpu_compute_type()
 
 
+def _transcribe_workers() -> int:
+    return max(1, settings.transcribe_workers)
+
+
 def _build_model(name: str, device: str, compute_type: str) -> WhisperModel:
+    if settings.engine == "gigaam":
+        from .gigaam_engine import GigaAmModel
+
+        logger.info("Loading GigaAM model %s device=%s batch_size=%s", name, device, settings.gigaam_batch_size)
+        # It answers the same `transcribe()` call, which is all the server asks of a model.
+        return cast(
+            WhisperModel,
+            GigaAmModel(
+                name,
+                device,
+                download_root=settings.gigaam_download_root or None,
+                batch_size=settings.gigaam_batch_size,
+            ),
+        )
     logger.info(
         "Loading Whisper model %s device=%s compute_type=%s cpu_threads=%s",
         name,
@@ -774,6 +811,9 @@ def _build_model(name: str, device: str, compute_type: str) -> WhisperModel:
         settings.cpu_threads,
     )
     model_kwargs: dict[str, Any] = {"device": device, "compute_type": compute_type}
+    if _transcribe_workers() > 1:
+        # Without it CTranslate2 runs concurrent calls one after another.
+        model_kwargs["num_workers"] = _transcribe_workers()
     if settings.cpu_threads > 0:
         model_kwargs["cpu_threads"] = settings.cpu_threads
     return WhisperModel(name, **model_kwargs)
@@ -815,7 +855,7 @@ def _load_model_sync() -> WhisperModel:
             return model
 
         device = _resolve_device()
-        name = settings.whisper_model
+        name = _configured_model()
         compute_type = _cpu_compute_type() if device == "cpu" else settings.compute_type
 
         try:
@@ -1002,7 +1042,7 @@ async def health(
     idle_seconds = time.monotonic() - model_last_used if model_last_used else 0.0
     return {
         "status": status,
-        "model": model_name if _model_was_loaded() else settings.whisper_model,
+        "model": model_name if _model_was_loaded() else _configured_model(),
         "device": _runtime_device(),
         "compute_type": model_compute_type if _model_was_loaded() else settings.compute_type,
         "model_state": "loaded" if model is not None else "sleeping",
@@ -1014,6 +1054,8 @@ async def health(
         "log_level": settings.log_level.upper(),
         "queue_size": str(transcription_queue.qsize()),
         "queue_capacity": str(settings.queue_max_size),
+        "transcribe_workers": str(_transcribe_workers()),
+        "engine": settings.engine,
         "uptime": _format_uptime(uptime_seconds),
         "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         **probe,
@@ -1053,11 +1095,11 @@ async def openai_audio_transcriptions(
     timestamp_granularities: list[str] | None = Form(default=None, alias="timestamp_granularities[]"),
     timestamp_granularities_plain: list[str] | None = Form(default=None, alias="timestamp_granularities"),
 ) -> Any:
-    if model not in {"whisper-1", settings.whisper_model}:
+    if model not in {"whisper-1", _configured_model()}:
         logger.info(
             "Ignoring OpenAI-compatible model=%s; using configured model=%s",
             model,
-            settings.whisper_model,
+            _configured_model(),
         )
 
     # Without `timestamp_granularities[]` verbose_json keeps its historical shape:
@@ -1092,11 +1134,11 @@ async def openai_audio_translations(
     temperature: Annotated[TemperatureArgument, Form()] = 0.0,
     timeout_seconds: Annotated[TimeoutArgument, Form()] = None,
 ) -> Any:
-    if model not in {"whisper-1", settings.whisper_model}:
+    if model not in {"whisper-1", _configured_model()}:
         logger.info(
             "Ignoring OpenAI-compatible model=%s; using configured model=%s",
             model,
-            settings.whisper_model,
+            _configured_model(),
         )
 
     word_timestamps = response_format == "verbose_json"

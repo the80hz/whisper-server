@@ -21,6 +21,14 @@ gpu = [
     "nvidia-cublas-cu12>=12.4.0; sys_platform == 'linux'",
 ]
 
+# GigaAM-v3 as a second engine (ENGINE=gigaam). v3 with word timestamps is not on PyPI, so
+# the package comes from a pinned commit; it brings torch with its own CUDA libraries.
+gigaam = [
+    "gigaam",
+    "torch>=2.6",
+    "silero-vad>=6.2.3",
+]
+
 [project.urls]
 Homepage = "https://github.com/the80hz/whisper-server"
 
@@ -42,3 +50,10 @@ dev = [
 
 [tool.ruff]
 line-length = 120
+
+[tool.uv]
+# torch ships its own CUDA libraries; the ones CTranslate2 needs are a separate set.
+conflicts = [[{ extra = "gpu" }, { extra = "gigaam" }]]
+
+[tool.uv.sources]
+gigaam = { git = "https://github.com/salute-developers/GigaAM", rev = "7447938d791c4f3e643386ee22c33777004293a5" }
