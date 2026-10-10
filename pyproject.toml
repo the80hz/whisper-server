@@ -26,6 +26,8 @@ gpu = [
 gigaam = [
     "gigaam",
     "torch>=2.6",
+    # gigaam imports it without declaring it.
+    "torchaudio>=2.11.0",
     "silero-vad>=6.2.3",
 ]
 

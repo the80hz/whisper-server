@@ -683,7 +683,7 @@ model: WhisperModel | None = None
 model_lock = threading.RLock()
 model_last_used: float = 0.0
 model_in_use: int = 0
-model_name: str = settings.whisper_model
+model_name: str = settings.gigaam_model if settings.engine == "gigaam" else settings.whisper_model
 model_device: str = settings.device
 model_compute_type: str = settings.compute_type
 model_cpu_fallback: bool = False
