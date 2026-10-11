@@ -6,12 +6,13 @@ The model itself is not loaded: these parts are plain Python.
 from typing import Any
 
 from fastapi.testclient import TestClient
+import numpy as np
 import pytest
 
 from whisper_server import server
 from whisper_server.audio import AudioInfo
 from whisper_server.chunking import plan_chunks
-from whisper_server.gigaam_engine import Info, batches, phrases_of_chunk
+from whisper_server.gigaam_engine import Info, batches, levelled, phrases_of_chunk, unheard
 
 BUILD_MODEL = server._build_model
 
@@ -80,7 +81,7 @@ def test_gigaam_engine_is_built_from_its_own_settings(monkeypatch):
 
     BUILD_MODEL("v3_e2e_rnnt", "cuda", "int8")
 
-    assert built == [(("v3_e2e_rnnt", "cuda"), {"download_root": "/models", "batch_size": 8})]
+    assert built == [(("v3_e2e_rnnt", "cuda"), {"download_root": "/models", "batch_size": 8, "quiet_speech": True})]
 
 
 def test_gigaam_engine_serves_the_same_endpoint(monkeypatch):
@@ -133,3 +134,57 @@ def test_gigaam_without_its_packages_says_what_to_install(monkeypatch):
 
     with pytest.raises(RuntimeError, match="--extra gigaam"):
         GigaAmModel("v3_e2e_rnnt", "cpu")
+
+
+def test_levelling_makes_a_quiet_voice_as_loud_as_a_loud_one():
+    rate = 16_000
+    time = np.arange(rate * 2) / rate
+    loud = 0.5 * np.sin(2 * np.pi * 220 * time)
+    quiet = 0.01 * np.sin(2 * np.pi * 220 * time)
+    silence = np.zeros(rate * 2)
+    wave = np.concatenate([loud, quiet, silence]).astype(np.float32)
+
+    out = levelled(wave)
+
+    def rms(part: np.ndarray) -> float:
+        return float(np.sqrt((part**2).mean()))
+
+    # Inside each stretch, away from the borders the smoothing blurs.
+    loud_out, quiet_out = out[rate // 2 : rate * 3 // 2], out[rate * 5 // 2 : rate * 7 // 2]
+    assert rms(quiet_out) == pytest.approx(rms(loud_out), rel=0.05)
+    assert rms(quiet) < rms(loud) / 40
+    # The gain is capped: silence stays silence.
+    assert rms(out[rate * 9 // 2 : rate * 11 // 2]) < 1e-4
+    assert out.dtype == np.float32
+    assert len(out) == len(wave)
+
+
+def test_levelling_an_empty_recording_is_itself():
+    assert len(levelled(np.zeros(0, dtype=np.float32))) == 0
+
+
+def test_of_the_second_look_only_words_in_the_silence_of_the_first_are_kept():
+    [found] = phrases_of_chunk(
+        [("Центр", 0.0, 0.3), ("иммунологии.", 0.35, 0.9), ("Здравствуйте,", 1.0, 1.5), ("девушка", 1.55, 1.9)],
+        offset=20.0,
+    )
+    heard = [(21.05, 21.5), (21.55, 21.9), (22.4, 22.9)]
+
+    kept = unheard(found, heard)
+
+    # The client's words are in the transcript already; the greeting before them is new.
+    assert [segment.text for segment in kept] == [" Центр иммунологии."]
+    assert (kept[0].start, kept[0].end) == (20.0, 20.9)
+    assert unheard(found, [(19.0, 23.0)]) == []
+
+
+def test_quiet_speech_setting_reaches_the_engine(monkeypatch):
+    built: list[dict[str, Any]] = []
+    monkeypatch.setattr("whisper_server.gigaam_engine.GigaAmModel", lambda *args, **kwargs: built.append(kwargs))
+    monkeypatch.setattr(server.settings, "engine", "gigaam")
+    monkeypatch.setattr(server.settings, "gigaam_quiet_speech", False)
+
+    BUILD_MODEL("v3_e2e_rnnt", "cuda", "int8")
+
+    assert built[0]["quiet_speech"] is False
+    assert server.settings.__class__().gigaam_quiet_speech is True

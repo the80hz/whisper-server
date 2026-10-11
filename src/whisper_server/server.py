@@ -801,6 +801,7 @@ def _build_model(name: str, device: str, compute_type: str) -> WhisperModel:
                 device,
                 download_root=settings.gigaam_download_root or None,
                 batch_size=settings.gigaam_batch_size,
+                quiet_speech=settings.gigaam_quiet_speech,
             ),
         )
     logger.info(

@@ -65,6 +65,7 @@ Environment variables (see `sample.env`):
 | `GIGAAM_MODEL` | `v3_e2e_rnnt` | GigaAM model name, used when `ENGINE=gigaam`. |
 | `GIGAAM_DOWNLOAD_ROOT` | empty | Directory with GigaAM weights; empty means `~/.cache/gigaam`. They are downloaded on first start. |
 | `GIGAAM_BATCH_SIZE` | `16` | Chunks of one recording that go through GigaAM together. |
+| `GIGAAM_QUIET_SPEECH` | `true` | Run the speech detector a second time over the recording brought to one loudness, so a quiet voice next to a loud one is not skipped. |
 | `LOG_LEVEL` | `INFO` | Root logging verbosity. |
 | `LOG_FILE` | `logs/whisper.log` | Path for persistent application logs (directory created automatically). |
 | `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
@@ -282,6 +283,16 @@ What differs:
   pauses, the chunks go through the model in batches (`GIGAAM_BATCH_SIZE`), and each chunk
   is split into phrases at the pauses between its words. Music on hold does not swallow the
   speech next to it, which Whisper is prone to.
+- The speech detector looks at a recording twice: as it is, and with every half second
+  brought to the same loudness (`GIGAAM_QUIET_SPEECH`). The speech of the second pass
+  is recognised as chunks of its own, and of those only the words that fall where the first
+  pass left silence are kept: the result of the first pass does not change. The model always
+  gets the original sound. Without the second pass a quiet voice right after loud sound is
+  skipped: on 100 clinic calls where an operator picked up after the music on hold, their
+  greeting reached the transcript in 14 calls without it and in 48 with it, of the 63 where
+  a greeting can be heard at all. On 96 ordinary calls nothing was lost and the transcripts
+  grew by 0.9 % in words. The price is a second recognition of the speech: about twice the
+  GPU work per recording.
 - There is no text input: `hotwords`, `prompt`, `temperature` and `language` are accepted
   and ignored. Rare surnames and drug names come out worse than from Whisper with hotwords.
 - Words have no `probability`, segments no `avg_logprob`.

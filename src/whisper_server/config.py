@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     gigaam_download_root: str = ""
     # Chunks of one recording that go through GigaAM together.
     gigaam_batch_size: int = 16
+    # Look for quiet speech with a second pass of the speech detector over the recording
+    # brought to one loudness. Without it a quiet voice right after loud sound is skipped.
+    gigaam_quiet_speech: bool = True
     log_level: str = "INFO"
     device: str = "auto"
     compute_type: str = "int8"
@@ -113,6 +116,7 @@ class Settings(BaseSettings):
         "condition_on_previous_text",
         "temperature_fallback",
         "health_wake_model",
+        "gigaam_quiet_speech",
         "cuda_oom_fallback_cpu",
         mode="before",
     )
