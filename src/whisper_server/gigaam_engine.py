@@ -158,6 +158,7 @@ class GigaAmModel:
             import torch
         except ImportError as error:
             raise RuntimeError("ENGINE=gigaam needs the optional packages: uv sync --extra gigaam") from error
+        _drop_flash_import_error()
         if max_chunk >= 25.0:
             raise ValueError("max_chunk must stay below 25 s, the limit of the model")
         self._torch = torch
@@ -235,6 +236,23 @@ class GigaAmModel:
             encoded, encoded_len = self._asr.forward(wav, lengths)
             decoded = self._asr._decode(encoded, encoded_len, lengths, True)
         return [[(str(w.text), float(w.start), float(w.end)) for w in (words or [])] for _text, words in decoded]
+
+
+def _drop_flash_import_error() -> None:
+    """Keep `gigaam.encoder` from pinning the first model in memory forever.
+
+    Without flash_attn the module keeps the ImportError of its import in `IMPORT_FLASH_ERR`.
+    The traceback of that error holds the frames of the import, and through `f_back` every
+    frame below it: when the module is first imported while a model is being built, that is
+    the `__init__` of the model, so unloading it never freed its weights (447 MiB of VRAM
+    on the GPU). Importing the module here and dropping the traceback breaks the chain.
+    """
+
+    import gigaam.encoder
+
+    error = getattr(gigaam.encoder, "IMPORT_FLASH_ERR", None)
+    if isinstance(error, BaseException):
+        error.__traceback__ = None
 
 
 def _load(audio: str | np.ndarray) -> np.ndarray:

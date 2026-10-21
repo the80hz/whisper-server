@@ -12,7 +12,7 @@ import pytest
 from whisper_server import server
 from whisper_server.audio import AudioInfo
 from whisper_server.chunking import plan_chunks
-from whisper_server.gigaam_engine import Info, batches, levelled, phrases_of_chunk, unheard
+from whisper_server.gigaam_engine import Info, _drop_flash_import_error, batches, levelled, phrases_of_chunk, unheard
 
 BUILD_MODEL = server._build_model
 
@@ -134,6 +134,27 @@ def test_gigaam_without_its_packages_says_what_to_install(monkeypatch):
 
     with pytest.raises(RuntimeError, match="--extra gigaam"):
         GigaAmModel("v3_e2e_rnnt", "cpu")
+
+
+def test_the_flash_attn_import_error_does_not_pin_the_frames_that_imported_it(monkeypatch):
+    import sys
+    import types
+
+    try:
+        raise ImportError("No module named 'flash_attn'")
+    except ImportError as error:
+        stored = error
+    assert stored.__traceback__ is not None
+    encoder = types.ModuleType("gigaam.encoder")
+    encoder.IMPORT_FLASH_ERR = stored  # type: ignore[attr-defined]
+    package = types.ModuleType("gigaam")
+    package.encoder = encoder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gigaam", package)
+    monkeypatch.setitem(sys.modules, "gigaam.encoder", encoder)
+
+    _drop_flash_import_error()
+
+    assert stored.__traceback__ is None
 
 
 def test_levelling_makes_a_quiet_voice_as_loud_as_a_loud_one():
