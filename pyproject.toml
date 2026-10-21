@@ -1,7 +1,7 @@
 [project]
 name = "whisper-server"
 version = "0.1.0"
-description = "FastAPI wrapper around faster-whisper with Docker and uv tooling"
+description = "OpenAI-compatible speech-to-text server: faster-whisper or GigaAM-v3, CPU or GPU"
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [{ name = "the80hz", email = "dnl.vlgv@mail.ru" }]
@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# CUDA 12 libraries for CTranslate2: faster-whisper on an NVIDIA GPU.
 gpu = [
     "nvidia-cudnn-cu12>=9.1.0; sys_platform == 'linux'",
     "nvidia-cublas-cu12>=12.4.0; sys_platform == 'linux'",
@@ -30,6 +31,18 @@ gigaam = [
     "torchaudio>=2.11.0",
     "silero-vad>=6.2.3",
 ]
+
+# The same set with torch built for CPU only, from the PyTorch index: no CUDA libraries, a
+# fraction of the size. On macOS both are the PyPI wheel, which has no CUDA anyway.
+gigaam-cpu = [
+    "gigaam",
+    "torch>=2.6",
+    "torchaudio>=2.11.0",
+    "silero-vad>=6.2.3",
+]
+
+[project.scripts]
+whisper-server = "whisper_server.server:main"
 
 [project.urls]
 Homepage = "https://github.com/the80hz/whisper-server"
@@ -55,7 +68,15 @@ line-length = 120
 
 [tool.uv]
 # torch ships its own CUDA libraries; the ones CTranslate2 needs are a separate set.
-conflicts = [[{ extra = "gpu" }, { extra = "gigaam" }]]
+# One variant at a time: none (CPU Whisper), `gpu`, `gigaam` or `gigaam-cpu`.
+conflicts = [[{ extra = "gpu" }, { extra = "gigaam" }, { extra = "gigaam-cpu" }]]
 
 [tool.uv.sources]
 gigaam = { git = "https://github.com/salute-developers/GigaAM", rev = "7447938d791c4f3e643386ee22c33777004293a5" }
+torch = [{ index = "pytorch-cpu", extra = "gigaam-cpu", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cpu", extra = "gigaam-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

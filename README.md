@@ -1,188 +1,113 @@
-# Whisper Server
+# whisper-server
 
-FastAPI-based microservice that wraps [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for lightweight, production-friendly speech-to-text workloads. The project uses [uv](https://docs.astral.sh/uv/) for dependency management and targets Python 3.13.
+Сервер распознавания речи с OpenAI-совместимым API. Внутри
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) или
+[GigaAM-v3](https://github.com/salute-developers/GigaAM) (только русский); работает
+на CPU и на GPU, запускается через `uv run` или Docker.
 
-## Features
+- `/v1/audio/transcriptions` и `/v1/audio/translations` в формате OpenAI, плюс
+  простой `/transcribe`;
+- ответы `json`, `text`, `srt`, `vtt`, `verbose_json` со словами и метками времени;
+- записи до 2 часов, раздельное распознавание каналов стерео, подсказки лексики;
+- модель грузится по первому запросу и выгружается по простою, при нехватке
+  видеопамяти работа продолжается на CPU;
+- очередь FIFO, параллельная обработка нескольких записей, токен по желанию.
 
-- Single `/transcribe` endpoint accepting audio uploads via `multipart/form-data`.
-- OpenAI-compatible `/v1/audio/transcriptions` and `/v1/audio/translations` endpoints for drop-in local API usage.
-- Lazy model loading with an idle sleep: the model is unloaded after
-  `MODEL_UNLOAD_SECONDS` and reloaded on the next request, so a shared GPU is
-  only held while there is work.
-- Automatic CPU fallback when CUDA runs out of memory, using a CPU-sized model
-  and a CPU-supported compute type.
-- Built-in FIFO queue with a single worker to avoid concurrent model conflicts.
-- Optional bearer-token authentication via `API_TOKEN`.
-- Backward-compatible `API_KEY` alias for older bratishkabot whisper deployments.
-- JSON, plain text, SRT, VTT, and verbose JSON responses.
-- Long recordings (up to 2 h / 500 MB by default) with a duration-based timeout.
-- Optional per-channel recognition of stereo files and vocabulary hints (`hotwords`).
-- Configurable via environment variables (`sample.env` provided).
-- Ready-to-ship Dockerfile plus `docker compose` definition and Makefile shortcuts.
+Почему всё устроено именно так и на каких замерах это держится:
+[docs/README.md](docs/README.md).
 
-## Quick Start
+## Варианты
 
-1. [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure Python 3.13 is available.
-2. Copy the example environment file: `cp sample.env .env` and tweak values as needed.
-3. Install dependencies with `uv sync`.
-4. Launch the API:
+Движок и устройство выбираются при установке, один вариант за раз:
 
-   ```bash
-   uv run uvicorn whisper_server.server:app --host 0.0.0.0 --port ${PORT:-3373}
-   ```
+| Вариант | Движок | Устройство | uv | Docker-образ |
+| --- | --- | --- | --- | --- |
+| `cpu` | faster-whisper | CPU | `uv sync` | `ghcr.io/the80hz/whisper-api:latest` |
+| `gpu` | faster-whisper | NVIDIA, CUDA 12 | `uv sync --extra gpu` | `ghcr.io/the80hz/whisper-api:gpu` |
+| `gigaam` | GigaAM-v3 | NVIDIA | `uv sync --extra gigaam` | `ghcr.io/the80hz/whisper-api:gigaam` |
+| `gigaam-cpu` | GigaAM-v3 | CPU | `uv sync --extra gigaam-cpu` | `ghcr.io/the80hz/whisper-api:gigaam-cpu` |
 
-5. Transcribe audio via curl:
+У каждого образа есть и тег, закреплённый на коммит: `sha-<коммит>`,
+`gpu-sha-<коммит>`, `gigaam-sha-<коммит>`, `gigaam-cpu-sha-<коммит>`. Для
+развёртывания лучше он: если `pull` оборвётся посреди слоя, плавающий тег молча
+оставит старый локальный образ. `cpu`, `gpu` и `gigaam-cpu` собираются для
+`linux/amd64` и `linux/arm64`, `gigaam` только для `linux/amd64`. Пакеты
+публичные, логин не нужен.
 
-   ```bash
-   curl -X POST "http://localhost:3373/transcribe" \
-     -H "accept: application/json" \
-     -H "Content-Type: multipart/form-data" \
-     -F "file=@/path/to/audio.wav"
-   ```
+## Быстрый старт
 
-6. Or use the OpenAI-compatible endpoint:
+```bash
+cp sample.env .env
+```
 
-   ```bash
-   curl -X POST "http://localhost:3373/v1/audio/transcriptions" \
-     -H "Authorization: Bearer ${API_TOKEN}" \
-     -F "file=@/path/to/audio.wav" \
-     -F "model=whisper-1" \
-     -F "language=ru" \
-     -F "response_format=verbose_json"
-   ```
+### uv
 
-Alternatively, use the Makefile helpers: `make setup` and `make run`.
+Python 3.13 и [uv](https://docs.astral.sh/uv/).
 
-## Configuration
+```bash
+uv sync                          # или --extra gpu, --extra gigaam, --extra gigaam-cpu
+uv run whisper-server            # порт из PORT, по умолчанию 3373
+```
 
-Environment variables (see `sample.env`):
+GigaAM включается переменной `ENGINE=gigaam` (в `.env` или в окружении). Веса
+скачиваются при первом старте: Whisper в `~/.cache/huggingface`, GigaAM в
+`~/.cache/gigaam`. Пока качаются веса GigaAM, сервис не отвечает на HTTP.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PORT` | `3373` | Port exposed by uvicorn and Docker image. |
-| `WHISPER_MODEL` | `large-v3-turbo` | Model name accepted by faster-whisper. |
-| `ENGINE` | `whisper` | Recogniser behind the API: `whisper` (faster-whisper) or `gigaam` (GigaAM-v3, Russian only; see below). |
-| `GIGAAM_MODEL` | `v3_e2e_rnnt` | GigaAM model name, used when `ENGINE=gigaam`. |
-| `GIGAAM_DOWNLOAD_ROOT` | empty | Directory with GigaAM weights; empty means `~/.cache/gigaam`. They are downloaded on first start. |
-| `GIGAAM_BATCH_SIZE` | `16` | Chunks of one recording that go through GigaAM together. |
-| `GIGAAM_QUIET_SPEECH` | `true` | Run the speech detector a second time over the recording brought to one loudness, so a quiet voice next to a loud one is not skipped. |
-| `LOG_LEVEL` | `INFO` | Root logging verbosity. |
-| `LOG_FILE` | `logs/whisper.log` | Path for persistent application logs (directory created automatically). |
-| `COMPUTE_TYPE` | `int8` | faster-whisper compute type (e.g., `int8`, `int8_float16`, `float16`). |
-| `DEVICE` | `auto` | Device hint passed to faster-whisper (`auto`, `cpu`, `cuda`). |
-| `QUEUE_MAX_SIZE` | `8` | Maximum number of pending transcription jobs in the queue. |
-| `TRANSCRIBE_WORKERS` | `1` | Recordings transcribed at the same time by one loaded model. Raise it on a GPU with spare VRAM and CPU cores; each running transcription takes its own share of VRAM. |
-| `DEFAULT_TIMEOUT_SECONDS` | `180` | Minimum per-request timeout when `timeout_seconds` is not provided; see `TIMEOUT_PER_AUDIO_SECOND`. |
-| `VAD_FILTER` | `true` | Enable faster-whisper VAD filtering before transcription. |
-| `VAD_THRESHOLD` | `0.5` | Silero VAD speech probability threshold. |
-| `VAD_MIN_SILENCE_DURATION_MS` | `500` | Silence duration used to split speech regions. |
-| `VAD_SPEECH_PAD_MS` | `200` | Audio padding retained around detected speech. |
-| `CONDITION_ON_PREVIOUS_TEXT` | `false` | Feed the previous window into the next one; disabled by default to prevent repetition loops. |
-| `REPETITION_PENALTY` | `1.1` | Penalty applied to tokens that were already generated. |
-| `NO_REPEAT_NGRAM_SIZE` | `3` | Prevent repeated n-grams of this size; `0` disables the restriction. |
-| `COMPRESSION_RATIO_THRESHOLD` | `2.2` | Treat highly compressible (usually repetitive) output as a failed decoding attempt. |
-| `LOG_PROB_THRESHOLD` | `-1.0` | Retry decoding when average token probability is too low. |
-| `NO_SPEECH_THRESHOLD` | `0.6` | Probability threshold used to classify a window as silence. |
-| `TEMPERATURE_FALLBACK` | `true` | Retry zero-temperature decoding at increasing temperatures when quality thresholds fail. |
-| `HALLUCINATION_SILENCE_THRESHOLD` | `1.0` | Skip silence around suspected hallucinations; `0` disables this behavior. |
-| `CPU_THREADS` | `0` | CPU worker threads passed to faster-whisper when greater than `0`; `0` means auto. |
-| `MODEL_UNLOAD_SECONDS` | `60` | Idle seconds before the model is unloaded and its VRAM released. Set `0` to keep it loaded. |
-| `HEALTH_WAKE_MODEL` | `false` | Let `/health` wake a sleeping model for its probe. See [Idle sleep and CPU fallback](#idle-sleep-and-cpu-fallback). |
-| `CUDA_OOM_FALLBACK_CPU` | `true` | Fall back to CPU inference when CUDA is out of memory. |
-| `CPU_FALLBACK_MODEL` | `small` | Model used by that fallback; empty keeps `WHISPER_MODEL`. |
-| `CPU_FALLBACK_COMPUTE_TYPE` | `int8` | Compute type for CPU runs; GPU-only types are not supported on CPU. |
-| `MAX_UPLOAD_MB` | `500` | Upload size limit for all transcription endpoints; larger files get `413`. |
-| `MAX_AUDIO_SECONDS` | `7500` | Longest accepted recording; longer audio gets `413`. |
-| `TIMEOUT_PER_AUDIO_SECOND` | `1.0` | The wait for a result is `max(DEFAULT_TIMEOUT_SECONDS, duration * TIMEOUT_PER_AUDIO_SECOND)`. |
-| `API_TOKEN` | unset | Optional bearer token required for all transcription endpoints when set. |
-| `API_KEY` | unset | Compatibility alias for `API_TOKEN`; `API_TOKEN` takes precedence. |
+То же через Makefile: `make setup` (или `setup-gpu`, `setup-gigaam`,
+`setup-gigaam-cpu`), затем `make run`.
 
-## Idle Sleep and CPU Fallback
+### Docker
 
-The model is not kept in memory between requests. After `MODEL_UNLOAD_SECONDS`
-without work it is unloaded, its VRAM is released, and the next request loads it
-again. On a GPU shared with other services this is what lets them use the card
-while no transcription is running; the cost is the model load time on the first
-request after a sleep.
+```bash
+docker compose up -d                                              # CPU
+docker compose -f compose.yml -f compose.gpu.yml up -d            # GPU
+docker compose --profile gigaam up -d                             # + GigaAM на CPU, порт 3375
+docker compose -f compose.yml -f compose.gpu.yml --profile gigaam up -d   # + GigaAM на GPU
+```
 
-Because the GPU is shared, a wake-up can land while another process holds the
-VRAM. When `CUDA_OOM_FALLBACK_CPU` is set, a CUDA out-of-memory error does not
-fail the request: the model is loaded for CPU inference instead, and the
-transcription continues. CTranslate2 allocates lazily, so this is handled both
-when the model loads and when the GPU runs out of memory mid-transcription.
+Compose берёт готовые образы из GHCR; `--build` соберёт их локально. Без compose:
 
-A CPU run is not the GPU run with a different device flag:
+```bash
+docker build --build-arg VARIANT=gigaam-cpu -t whisper-api:gigaam-cpu .
+docker run --env-file .env -e ENGINE=gigaam -p 3373:3373 \
+  -v ./model-cache/gigaam:/root/.cache/gigaam whisper-api:gigaam-cpu
+```
 
-- **Model.** `WHISPER_MODEL` is sized for the GPU. On a 4-core container CPU
-  (Xeon E5-2690 v4, `int8`, Russian speech) `large-v3-turbo` measured a real-time
-  factor of 0.88 against 0.38 for `small`, which leaves almost no headroom before
-  `DEFAULT_TIMEOUT_SECONDS` once decoding retries at higher temperatures. The
-  fallback therefore loads `CPU_FALLBACK_MODEL`, a smaller multilingual model,
-  unless that value is empty. `base` is faster still but drops digits, and the
-  `distil-*` models are English-only.
-- **Compute type.** GPU compute types such as `int8_float16` and `float16` have
-  no CPU kernels in CTranslate2. Any CPU run uses `CPU_FALLBACK_COMPUTE_TYPE`,
-  checked against `ctranslate2.get_supported_compute_types("cpu")` and downgraded
-  to a supported type if needed. This also applies to an explicit `DEVICE=cpu`
-  and to `DEVICE=auto` on a host without a GPU, where the configured
-  `WHISPER_MODEL` is still honoured.
+Для GPU нужен NVIDIA Container Toolkit и флаг `--gpus all`. Если CUDA падает с
+ошибкой про `libcudnn_ops.so`, образ не тот: нужен `:gpu`, а не `:latest`.
 
-The fallback is per load: the next wake-up tries the GPU again.
+### Проверка
 
-`/health` reports the current state:
+```bash
+curl -s localhost:3373/health
+curl -s localhost:3373/v1/audio/transcriptions \
+  -F file=@audio.wav -F language=ru -F response_format=text
+```
 
-| Field | Meaning |
+## API
+
+### `POST /v1/audio/transcriptions`
+
+Поля `multipart/form-data` в духе OpenAI:
+
+| Поле | Смысл |
 | --- | --- |
-| `model_state` | `loaded` or `sleeping` |
-| `device` / `compute_type` | What the loaded model actually uses, not what is configured |
-| `cpu_fallback` | `True` when the model is on CPU after a CUDA out-of-memory error |
-| `model_idle_seconds` / `model_unload_seconds` | How close the model is to being unloaded |
+| `file` | аудио или видео |
+| `model` | принимается для совместимости; работает модель из настроек |
+| `language` | код языка, например `ru` или `en` |
+| `prompt` | начальная подсказка |
+| `hotwords` | термины через запятую или с новой строки (имена, препараты, услуги), уходят в `hotwords` faster-whisper |
+| `channels` | `mix` (по умолчанию) или `split`, см. [Длинные записи и стерео](#длинные-записи-и-стерео) |
+| `timestamp_granularities[]` | `word` — слова внутри каждого сегмента |
+| `response_format` | `json`, `text`, `srt`, `vtt`, `verbose_json` |
+| `temperature` | температура декодирования, по умолчанию `0` |
+| `timeout_seconds` | таймаут этого запроса на стороне сервера |
 
-The probe transcribes a silent clip, which needs the model in memory. A sleeping
-model is left asleep and `/health` still answers `"status": "ok"`, so a monitor
-polling more often than `MODEL_UNLOAD_SECONDS` does not pin the model in VRAM.
-`GET /health?wake=true` forces a full probe, and `HEALTH_WAKE_MODEL=true` makes
-that the default. A probe of an already-loaded model does not postpone its
-unload.
+`/v1/audio/translations` устроен так же (без `hotwords`, `channels` и
+`timestamp_granularities[]`) и переводит на английский задачей Whisper
+`translate`.
 
-## `/transcribe` Arguments
-
-The endpoint supports query parameters in addition to file upload:
-
-- `task`: `transcribe` (default) or `translate`
-- `language`: language code hint (for example `ru`, `en`)
-- `word_timestamps`: `true/false` to include per-word timestamps
-- `timeout_seconds`: override request timeout for a single call
-
-When `API_TOKEN` or `API_KEY` is set, include `Authorization: Bearer <token>`.
-
-This endpoint is compatible with the current `bratishkabot` remote STT client:
-
-- `GET /health` returns a JSON object with `status`.
-- `POST /transcribe?language=ru` accepts a Telegram `voice.ogg` upload in multipart field `file`.
-- The response includes a top-level `text` field.
-
-## OpenAI-Compatible API
-
-`/v1/audio/transcriptions` accepts OpenAI-style multipart form fields:
-
-- `file`: audio or video file upload
-- `model`: accepted for compatibility; the server uses `WHISPER_MODEL`
-- `language`: optional language code hint, for example `ru` or `en`
-- `prompt`: optional initial prompt
-- `hotwords`: optional terms (clinic services, doctor names, drugs) separated by commas or
-  newlines, passed to faster-whisper `hotwords`; ignored with a
-  log warning on faster-whisper releases that lack the parameter
-- `channels`: `mix` (default) or `split`; see [Long recordings and stereo](#long-recordings-and-stereo)
-- `timestamp_granularities[]`: pass `word` to get `words` inside every segment
-- `response_format`: `json`, `text`, `srt`, `vtt`, or `verbose_json`
-- `temperature`: decoding temperature, default `0`
-- `timeout_seconds`: optional server-side timeout override
-
-`/v1/audio/translations` has the same shape (without `hotwords`, `channels` and `timestamp_granularities[]`)
-and runs Whisper's `translate` task.
-
-`verbose_json` response:
+Ответ `verbose_json`:
 
 ```json
 {"task": "transcribe", "language": "ru", "duration": 123.4, "text": "...",
@@ -193,197 +118,186 @@ and runs Whisper's `translate` task.
  "words": [{"start": 0.0, "end": 0.4, "word": "...", "probability": 0.9}]}
 ```
 
-- `model` is the model that actually ran (the CPU fallback model after a CUDA out-of-memory error).
-- `channels` is the channel count of the file, `channel_mode` echoes the request.
-- `channel` is present on every segment when `channel_mode` is `split`.
-- Segment `words` appear only with `timestamp_granularities[]=word`. The top-level `words` list is
-  kept for compatibility and is returned for every `verbose_json` request, as before.
+- `model` — модель, которая реально работала (после перехода на CPU это
+  `CPU_FALLBACK_MODEL`).
+- `channels` — число каналов файла, `channel_mode` повторяет запрос; `channel`
+  есть у каждого сегмента при `split`.
+- `words` внутри сегментов только с `timestamp_granularities[]=word`. Общий список
+  `words` наверху ответа остаётся для совместимости и есть в любом `verbose_json`.
 
-Examples:
+### `POST /transcribe`
 
-```bash
-curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
-  -H "Authorization: Bearer ${API_TOKEN}" \
-  -F "file=@meeting.m4a" \
-  -F "model=whisper-1" \
-  -F "language=ru" \
-  -F "response_format=text"
-```
+Поле `file` и параметры запроса `task` (`transcribe` или `translate`),
+`language`, `word_timestamps`, `timeout_seconds`. В ответе `text` на верхнем
+уровне. Этим путём пользуется удалённый STT-клиент бота: Telegram `voice.ogg`
+в `file`, `?language=ru`.
 
-```bash
-curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
-  -H "Authorization: Bearer ${API_TOKEN}" \
-  -F "file=@lecture.mp4" \
-  -F "model=whisper-1" \
-  -F "response_format=srt"
-```
+### `GET /health`
 
-## Long Recordings and Stereo
+Состояние сервиса и модели. Спящую модель не будит, `?wake=true` будит
+принудительно.
 
-faster-whisper decodes long audio in 30 s windows, so a 2 h file needs no manual chunking. What
-had to change were the limits:
+| Поле | Смысл |
+| --- | --- |
+| `model_state` | `loaded` или `sleeping` |
+| `model`, `device`, `compute_type` | что использовала последняя загрузка, а не что написано в настройках |
+| `cpu_fallback` | `true`, если модель на CPU после нехватки видеопамяти |
+| `model_idle_seconds`, `model_unload_seconds` | сколько осталось до выгрузки |
+| `transcribe_workers` | сколько записей обрабатывается одновременно |
 
-- **Upload.** The body is spooled to disk and never held in memory. A request whose
-  `Content-Length` exceeds `MAX_UPLOAD_MB` is refused with `413` before the body is received; the
-  size is checked again while the file is copied. Expect roughly twice the upload size in
-  temporary disk space while a request is in flight.
-- **Duration.** The header duration is probed after the upload. Audio longer than
-  `MAX_AUDIO_SECONDS` is refused with `413`.
-- **Timeout.** The wait for a result is `max(DEFAULT_TIMEOUT_SECONDS, duration * TIMEOUT_PER_AUDIO_SECOND)`.
-  It includes time spent in the queue. An explicit `timeout_seconds` still wins. If the header
-  cannot be probed, `DEFAULT_TIMEOUT_SECONDS` applies.
-- **Memory.** faster-whisper decodes the whole file to 16 kHz float32, about 460 MB for 2 h of mono
-  audio. `channels=split` holds every channel at once, so a 2 h stereo file needs about 1 GB of RAM.
+Если задан `API_TOKEN`, пути распознавания требуют
+`Authorization: Bearer <токен>`; `/health` открыт.
 
-`channels=split` transcribes each channel of a stereo file separately, which gives the speaker role
-from the channel without diarization:
+## Длинные записи и стерео
 
-- Every segment gets `channel` (0-based), and segments of all channels are merged into one list
-  sorted by `start`; `id` is the position in that list.
-- A mono file is one channel (`channel: 0`), not an error. Files with more than two channels are
-  split into one run per channel.
-- When `language` is not given, it is detected on channel 0 and reused for the other channels.
-- Channels run one after another, so `split` takes about as long as the channels' total duration.
-- `mix` (default) keeps the old behaviour: the file is downmixed and `channel` is omitted.
+faster-whisper сам режет звук на окна по 30 с, поэтому двухчасовой файл не нужно
+делить вручную. Ограничения:
 
-```bash
-curl -X POST "http://whisper-gpu:3373/v1/audio/transcriptions" \
-  -H "Authorization: Bearer ${API_TOKEN}" \
-  -F "file=@call.mp3" \
-  -F "language=ru" \
-  -F "response_format=verbose_json" \
-  -F "channels=split" \
-  -F "hotwords=Ivanov, laser dentistry" \
-  -F "timestamp_granularities[]=word"
-```
+- **Загрузка.** Тело запроса пишется на диск, не в память. Запрос с
+  `Content-Length` больше `MAX_UPLOAD_MB` получает 413 до приёма тела; размер
+  проверяется ещё раз при копировании. Временного места нужно примерно вдвое
+  больше размера файла.
+- **Длительность.** Запись длиннее `MAX_AUDIO_SECONDS` получает 413.
+- **Таймаут.** Ожидание результата —
+  `max(DEFAULT_TIMEOUT_SECONDS, длительность * TIMEOUT_PER_AUDIO_SECOND)`, время в
+  очереди входит. Явный `timeout_seconds` важнее. Если длительность не прочиталась
+  из заголовка, действует `DEFAULT_TIMEOUT_SECONDS`.
+- **Память.** Файл декодируется целиком в 16 кГц float32: около 460 МБ на 2 часа
+  моно. `channels=split` держит все каналы сразу, двухчасовое стерео — около 1 ГБ.
 
-The `/transcribe` endpoint is unchanged apart from three additive top-level fields in its response
-(`model`, `channels`, `channel_mode`).
+`channels=split` распознаёт каналы стерео по отдельности, и говорящий известен по
+каналу без диаризации:
 
-Not verified on a real 2 h / 500 MB file; run one on the target GPU before relying on the limits.
+- у каждого сегмента есть `channel` (с нуля), сегменты всех каналов слиты в один
+  список по `start`, `id` — позиция в нём;
+- моно — это один канал (`channel: 0`), а не ошибка; файл с тремя и больше
+  каналами делится на столько же прогонов;
+- без `language` язык определяется по каналу 0 и используется для остальных;
+- каналы идут по очереди, так что `split` занимает примерно суммарную длительность
+  каналов.
 
-## Parallel Transcription
+Реальный двухчасовой файл на 500 МБ на GPU не проверялся.
 
-By default recordings are transcribed one after another. `TRANSCRIBE_WORKERS=N` lets N
-of them run at the same time against one loaded model; the queue (`QUEUE_MAX_SIZE`) holds
-what is waiting beyond that. Each running transcription takes its own share of VRAM and a
-CPU core for decoding the audio, so raise the number on a GPU that sits idle, not on one
-that is full. `/health` reports the value as `transcribe_workers`.
+## GigaAM
 
-## GigaAM Engine
+`ENGINE=gigaam` отдаёт тот же API, но распознаёт GigaAM-v3 (`v3_e2e_rnnt`). Очередь,
+воркеры, ограничения, раздельные каналы и все форматы ответа работают так же.
 
-`ENGINE=gigaam` serves the same API with [GigaAM-v3](https://github.com/salute-developers/GigaAM)
-(MIT, Russian only) instead of Whisper. The queue, the workers, the upload limits, the
-channel split and every response format work the same way; the response carries
-`model: v3_e2e_rnnt`.
+Отличия:
 
-What differs:
+- Модель берёт не больше 25 с за раз, поэтому запись режется Silero VAD на куски
+  по паузам, куски идут через модель пачками (`GIGAAM_BATCH_SIZE`), каждый кусок
+  делится на фразы по паузам между словами. Музыка ожидания не поглощает соседнюю
+  речь, чем грешит Whisper.
+- Детектор речи смотрит на запись дважды: как есть и выровненной по громкости
+  (`GIGAAM_QUIET_SPEECH`). Из второго прохода берутся только слова там, где первый
+  видел тишину. Так не пропадает тихий голос после громкого звука; цена — примерно
+  вдвое больше работы модели.
+- Текстового входа нет: `hotwords`, `prompt`, `temperature` и `language`
+  принимаются и игнорируются. Редкие фамилии и названия препаратов выходят хуже,
+  чем у Whisper с подсказками. Английский и перевод не поддерживаются.
+- У слов нет `probability`, у сегментов нет `avg_logprob`.
+- Тире диалога, которое модель пишет отдельным токеном, отбрасывается.
+- При нехватке видеопамяти та же модель перегружается на CPU, меньшей нет.
 
-- The model takes up to 25 s at once, so a recording is cut by Silero VAD into chunks at
-  pauses, the chunks go through the model in batches (`GIGAAM_BATCH_SIZE`), and each chunk
-  is split into phrases at the pauses between its words. Music on hold does not swallow the
-  speech next to it, which Whisper is prone to.
-- The speech detector looks at a recording twice: as it is, and with every half second
-  brought to the same loudness (`GIGAAM_QUIET_SPEECH`). The speech of the second pass
-  is recognised as chunks of its own, and of those only the words that fall where the first
-  pass left silence are kept: the result of the first pass does not change. The model always
-  gets the original sound. Without the second pass a quiet voice right after loud sound is
-  skipped: on 100 clinic calls where an operator picked up after the music on hold, their
-  greeting reached the transcript in 14 calls without it and in 48 with it, of the 63 where
-  a greeting can be heard at all. On 96 ordinary calls nothing was lost and the transcripts
-  grew by 0.9 % in words. The price is a second recognition of the speech: about twice the
-  GPU work per recording.
-- There is no text input: `hotwords`, `prompt`, `temperature` and `language` are accepted
-  and ignored. Rare surnames and drug names come out worse than from Whisper with hotwords.
-- Words have no `probability`, segments no `avg_logprob`.
-- A dialogue dash the model writes as a separate token is dropped: it is not a word.
-- On a CUDA out-of-memory error the same model is reloaded on CPU; there is no smaller one.
+Декодирование — цикл на Python, поэтому больше нескольких `TRANSCRIBE_WORKERS`
+потоки ждут друг друга. Для большей пропускной способности — несколько
+контейнеров или `uvicorn --workers N`.
 
-The packages are an optional extra, because they bring torch:
+## Засыпание модели и переход на CPU
 
-```bash
-uv sync --extra gigaam          # not together with --extra gpu
-ENGINE=gigaam uv run uvicorn whisper_server.server:app --port 3373
+Модель не держится в памяти между запросами: после `MODEL_UNLOAD_SECONDS` простоя
+она выгружается и освобождает видеопамять, следующий запрос грузит её заново. На
+общей карте это даёт соседям пользоваться ей, пока распознавать нечего.
 
-docker build --build-arg INSTALL_GIGAAM=true -t whisper-server:gigaam .
-docker run --gpus all -e ENGINE=gigaam -v ./gigaam-cache:/root/.cache/gigaam -p 3373:3373 whisper-server:gigaam
-```
+Пробуждение может попасть на момент, когда карту занял кто-то другой. При
+`CUDA_OOM_FALLBACK_CPU=true` нехватка видеопамяти не роняет запрос: модель
+грузится на CPU, распознавание продолжается. CTranslate2 выделяет память лениво,
+поэтому перехват работает и при загрузке, и посреди распознавания. Переход
+действует на одну загрузку, следующее пробуждение снова пробует GPU.
 
-Decoding is a Python loop, so past a few `TRANSCRIBE_WORKERS` the threads wait for each
-other; run several containers, or `uvicorn --workers N`, for more.
+Запуск на CPU — это не GPU с другим флагом:
 
-## Docker & Compose
+- **Модель.** `WHISPER_MODEL` подобрана под GPU, на CPU она слишком медленная.
+  Переход грузит `CPU_FALLBACK_MODEL` (`small`), если она не пуста.
+- **Тип вычислений.** GPU-типов `int8_float16` и `float16` у CTranslate2 на CPU
+  нет. Любой запуск на CPU берёт `CPU_FALLBACK_COMPUTE_TYPE` и при необходимости
+  понижает его до поддерживаемого. Это касается и явного `DEVICE=cpu`, и
+  `DEVICE=auto` без GPU; модель в этих случаях остаётся `WHISPER_MODEL`.
 
-Build and run with Docker:
+Замеры, по которым выбраны значения: [docs/research.md](docs/research.md).
 
-```bash
-docker build -t whisper-server .
-docker run --env-file .env -p ${PORT:-3373}:${PORT:-3373} whisper-server
-```
+## Параллельная обработка
 
-The default image is CPU-only to keep uploads smaller. To build an image with
-CUDA runtime libraries bundled:
+По умолчанию записи обрабатываются по одной. `TRANSCRIBE_WORKERS=N` даёт N
+записям идти одновременно на одной загруженной модели, остальные ждут в очереди
+(`QUEUE_MAX_SIZE`). Каждая запись в работе занимает свою долю видеопамяти и ядро
+CPU на декодирование звука, поэтому число поднимают на простаивающей карте, а не
+на занятой.
 
-```bash
-docker build --build-arg INSTALL_GPU=true -t whisper-server:gpu .
-```
+## Настройки
 
-Or use Compose:
+Переменные окружения, образец — [sample.env](sample.env).
 
-```bash
-docker compose up --build
-```
+| Переменная | По умолчанию | Смысл |
+| --- | --- | --- |
+| `PORT` | `3373` | порт HTTP |
+| `ENGINE` | `whisper` | `whisper` или `gigaam` |
+| `WHISPER_MODEL` | `large-v3-turbo` | модель faster-whisper |
+| `GIGAAM_MODEL` | `v3_e2e_rnnt` | модель GigaAM |
+| `GIGAAM_DOWNLOAD_ROOT` | пусто | каталог весов GigaAM; пусто — `~/.cache/gigaam` |
+| `GIGAAM_BATCH_SIZE` | `16` | кусков одной записи в одной пачке GigaAM |
+| `GIGAAM_QUIET_SPEECH` | `true` | второй проход детектора по выровненной громкости |
+| `DEVICE` | `auto` | `auto`, `cpu` или `cuda` |
+| `COMPUTE_TYPE` | `int8` | тип вычислений faster-whisper: `int8`, `int8_float16`, `float16` |
+| `CPU_THREADS` | `0` | потоки CPU faster-whisper; `0` — авто |
+| `QUEUE_MAX_SIZE` | `8` | ожидающих задач, дальше 429 |
+| `TRANSCRIBE_WORKERS` | `1` | записей одновременно |
+| `DEFAULT_TIMEOUT_SECONDS` | `180` | минимальный таймаут запроса |
+| `TIMEOUT_PER_AUDIO_SECOND` | `1.0` | таймаут на секунду аудио |
+| `MAX_UPLOAD_MB` | `500` | предел размера файла |
+| `MAX_AUDIO_SECONDS` | `7500` | предел длительности записи |
+| `MODEL_UNLOAD_SECONDS` | `60` | выгрузка после простоя; `0` — не выгружать |
+| `HEALTH_WAKE_MODEL` | `false` | разрешить `/health` будить модель |
+| `CUDA_OOM_FALLBACK_CPU` | `true` | переход на CPU при нехватке видеопамяти |
+| `CPU_FALLBACK_MODEL` | `small` | модель для этого перехода; пусто — `WHISPER_MODEL` |
+| `CPU_FALLBACK_COMPUTE_TYPE` | `int8` | тип вычислений на CPU |
+| `VAD_FILTER` | `true` | VAD faster-whisper перед распознаванием |
+| `VAD_THRESHOLD` | `0.5` | порог вероятности речи Silero VAD |
+| `VAD_MIN_SILENCE_DURATION_MS` | `500` | тишина, которая разделяет фрагменты речи |
+| `VAD_SPEECH_PAD_MS` | `200` | запас вокруг найденной речи |
+| `CONDITION_ON_PREVIOUS_TEXT` | `false` | подавать предыдущее окно в следующее; выключено против зацикливания |
+| `REPETITION_PENALTY` | `1.1` | штраф за уже сгенерированные токены |
+| `NO_REPEAT_NGRAM_SIZE` | `3` | запрет повторов n-грамм этой длины; `0` — без запрета |
+| `COMPRESSION_RATIO_THRESHOLD` | `2.2` | слишком сжимаемый (повторяющийся) текст считается неудачей |
+| `LOG_PROB_THRESHOLD` | `-1.0` | повтор декодирования при низкой средней вероятности |
+| `NO_SPEECH_THRESHOLD` | `0.6` | порог «окно — тишина» |
+| `TEMPERATURE_FALLBACK` | `true` | повтор с повышенной температурой при провале порогов |
+| `HALLUCINATION_SILENCE_THRESHOLD` | `1.0` | пропуск тишины вокруг подозрительных галлюцинаций; `0` — выключить |
+| `LOG_LEVEL` | `INFO` | уровень логов |
+| `LOG_FILE` | `logs/whisper.log` | файл логов, каталог создаётся сам |
+| `API_TOKEN` | пусто | bearer-токен для путей распознавания |
+| `API_KEY` | пусто | старое имя `API_TOKEN` для совместимости; `API_TOKEN` важнее |
 
-The compose service loads `.env`, maps the configured port, and can be extended with volumes for cached models if desired.
-
-For NVIDIA GPU hosts (Linux), use the GPU override:
-
-```bash
-docker compose -f compose.yml -f compose.gpu.yml up --build
-```
-
-If you use the published image instead of building locally, pull the GPU tag:
-
-```bash
-docker compose -f compose.yml -f compose.gpu.yml pull
-docker compose -f compose.yml -f compose.gpu.yml up
-```
-
-The GPU image must contain `nvidia-cudnn-cu12`. If CUDA crashes with a missing
-`libcudnn_ops.so` error, rebuild or pull the `:gpu` image rather than reusing
-`:latest`.
-
-GitHub Actions builds both variants on pull requests. Pushes to `main` publish
-multi-architecture images to the GitHub Container Registry as
-`ghcr.io/the80hz/whisper-api:latest` for CPU and `ghcr.io/the80hz/whisper-api:gpu`
-for CUDA, and the x86-64 image `ghcr.io/the80hz/whisper-api:gigaam` with the GigaAM engine. No registry secrets are needed: the workflow authenticates with the
-built-in `GITHUB_TOKEN` and `packages: write`, and the package inherits this
-repository's visibility, so the images pull anonymously.
-
-For LAN, Tailscale, or OpenVPN usage, bind the service on the GPU host and call it by its private address, for example `http://gpu-box:3373` or `http://100.x.y.z:3373`. Set `API_TOKEN` when the port is reachable by other machines.
-
-## Project Layout
+## Структура
 
 ```text
-.
-├── compose.yml
-├── Dockerfile
-├── Makefile
-├── pyproject.toml
-├── README.md
-├── sample.env
-└── src/
-    └── whisper_server/
-        ├── __init__.py
-        ├── audio.py
-        ├── chunking.py
-        ├── config.py
-        ├── gigaam_engine.py
-        └── server.py
+src/whisper_server/
+├── server.py          API, очередь, жизненный цикл модели, faster-whisper
+├── gigaam_engine.py   движок GigaAM: VAD-нарезка, пачки, второй проход
+├── chunking.py        нарезка записи на куски по паузам
+├── audio.py           чтение и декодирование аудио
+└── config.py          настройки из окружения
+scripts/               замеры скорости на CPU и GPU
+docs/                  история, решения и замеры
 ```
 
-## Development Notes
+## Разработка
 
-- Formatting and linting: `uv run ruff format .` and `uv run ruff check .` (line length 120)
-- Tests: `uv run pytest`
-- Use `uv lock` to generate a lockfile if you need a deterministic dependency snapshot.
+```bash
+uv sync
+uv run ruff format --check . && uv run ruff check . && uv run pytest
+```
+
+CI (`.github/workflows/docker-publish.yml`) собирает все четыре образа на pull
+request и публикует их в GHCR при push в `main`.

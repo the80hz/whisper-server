@@ -1158,7 +1158,12 @@ async def openai_audio_translations(
     return payload
 
 
-if __name__ == "__main__":  # pragma: no cover
+def main() -> None:  # pragma: no cover
+    """`whisper-server` command: serve the API on PORT."""
     import uvicorn
 
     uvicorn.run("whisper_server.server:app", host="0.0.0.0", port=settings.port)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

@@ -5,10 +5,10 @@ CPU threads. Accuracy is hardware-dependent, but the resulting RTF is useful for
 capacity planning.
 
 Usage:
-    python bench.py <model> <audio> [cpu_threads]
+    uv run python scripts/bench_cpu.py <model> <audio> [cpu_threads]
 
 Example:
-    python bench.py small test_for_bratishkabot.mp3 2
+    uv run python scripts/bench_cpu.py small test_for_bratishkabot.mp3 2
 """
 
 from __future__ import annotations

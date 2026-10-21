@@ -1,8 +1,13 @@
+# CPU by default:  docker compose up -d
+# GPU:             docker compose -f compose.yml -f compose.gpu.yml up -d
+# GigaAM-v3 next to Whisper, on GIGAAM_PORT (3375): add `--profile gigaam` to either command.
 services:
   whisper-api:
     image: ghcr.io/the80hz/whisper-api:latest
     build:
       context: .
+      args:
+        VARIANT: cpu
     env_file:
       - .env
     volumes:
@@ -13,3 +18,22 @@ services:
     restart: unless-stopped
     environment:
       PORT: "${PORT:-3373}"
+
+  gigaam:
+    profiles: [gigaam]
+    image: ghcr.io/the80hz/whisper-api:gigaam-cpu
+    build:
+      context: .
+      args:
+        VARIANT: gigaam-cpu
+    env_file:
+      - .env
+    volumes:
+      - ./logs/gigaam:/app/logs
+      - ./model-cache/gigaam:/root/.cache/gigaam
+    ports:
+      - "${GIGAAM_PORT:-3375}:${GIGAAM_PORT:-3375}"
+    restart: unless-stopped
+    environment:
+      PORT: "${GIGAAM_PORT:-3375}"
+      ENGINE: gigaam

@@ -1,9 +1,23 @@
+# GPU override:  docker compose -f compose.yml -f compose.gpu.yml up -d
+# Needs the NVIDIA Container Toolkit on the host.
 services:
   whisper-api:
     image: ghcr.io/the80hz/whisper-api:gpu
     build:
       args:
-        INSTALL_GPU: "true"
+        VARIANT: gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: all
+
+  gigaam:
+    image: ghcr.io/the80hz/whisper-api:gigaam
+    build:
+      args:
+        VARIANT: gigaam
     deploy:
       resources:
         reservations:

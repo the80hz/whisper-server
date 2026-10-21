@@ -4,10 +4,10 @@ Runs several model/compute_type combinations and prints RTF plus rough VRAM
 usage from nvidia-smi.
 
 Usage:
-    python bench_gpu.py <audio_file>
+    uv run python scripts/bench_gpu.py <audio_file>
 
 Example:
-    python bench_gpu.py test_for_bratishkabot.mp3
+    uv run python scripts/bench_gpu.py test_for_bratishkabot.mp3
 """
 
 from __future__ import annotations

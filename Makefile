@@ -1,32 +1,32 @@
 UV ?= uv
 PORT ?= 3373
-APP = whisper_server.server:app
 
-.PHONY: setup run dev lint format test docker-build docker-run compose
+.PHONY: setup setup-gpu setup-gigaam setup-gigaam-cpu run dev check format test
 
+# One variant at a time; each `setup-*` replaces the previous one.
 setup:
-	$(UV) sync --python 3.13
+	$(UV) sync
+
+setup-gpu:
+	$(UV) sync --extra gpu
+
+setup-gigaam:
+	$(UV) sync --extra gigaam
+
+setup-gigaam-cpu:
+	$(UV) sync --extra gigaam-cpu
 
 run:
-	$(UV) run uvicorn $(APP) --host 0.0.0.0 --port $(PORT)
+	PORT=$(PORT) $(UV) run --no-sync whisper-server
 
 dev:
-	$(UV) run uvicorn $(APP) --host 0.0.0.0 --port $(PORT) --reload
+	$(UV) run --no-sync uvicorn whisper_server.server:app --host 0.0.0.0 --port $(PORT) --reload
 
-lint:
-	$(UV) run ruff check .
+check:
+	$(UV) run --no-sync ruff format --check . && $(UV) run --no-sync ruff check . && $(UV) run --no-sync pytest
 
 format:
-	$(UV) run ruff format .
+	$(UV) run --no-sync ruff format .
 
 test:
-	$(UV) run pytest
-
-docker-build:
-	docker build -t whisper-server .
-
-docker-run:
-	docker run --rm --env-file .env -p $(PORT):$(PORT) whisper-server
-
-compose:
-	docker compose up --build
+	$(UV) run --no-sync pytest

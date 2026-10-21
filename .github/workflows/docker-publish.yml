@@ -20,23 +20,24 @@ jobs:
       matrix:
         include:
           - variant: cpu
-            install_gpu: "false"
             latest_tag: latest
             sha_prefix: sha-
             ref_suffix: ""
           - variant: gpu
-            install_gpu: "true"
             latest_tag: gpu
             sha_prefix: gpu-sha-
             ref_suffix: -gpu
           # GigaAM engine: torch with its own CUDA libraries, x86-64 only.
           - variant: gigaam
-            install_gpu: "false"
-            install_gigaam: "true"
             platforms: linux/amd64
             latest_tag: gigaam
             sha_prefix: gigaam-sha-
             ref_suffix: -gigaam
+          # GigaAM engine on CPU-only torch.
+          - variant: gigaam-cpu
+            latest_tag: gigaam-cpu
+            sha_prefix: gigaam-cpu-sha-
+            ref_suffix: -gigaam-cpu
 
     steps:
       - name: Checkout
@@ -77,8 +78,7 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
-            INSTALL_GPU=${{ matrix.install_gpu }}
-            INSTALL_GIGAAM=${{ matrix.install_gigaam || 'false' }}
+            VARIANT=${{ matrix.variant }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
