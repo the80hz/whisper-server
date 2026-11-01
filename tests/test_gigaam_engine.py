@@ -184,6 +184,23 @@ def test_levelling_an_empty_recording_is_itself():
     assert len(levelled(np.zeros(0, dtype=np.float32))) == 0
 
 
+@pytest.mark.parametrize("windows", [1, 2])
+def test_levelling_fewer_than_three_windows_keeps_the_length(windows: int):
+    wave = np.full(windows * 8_000, 0.01, dtype=np.float32)
+
+    out = levelled(wave, window=0.5)
+
+    assert out.shape == wave.shape
+    assert out.dtype == np.float32
+    assert np.all(out > wave)
+
+
+def test_levelling_a_partial_window_keeps_the_length():
+    wave = np.full(8_000 + 3_000, 0.01, dtype=np.float32)
+
+    assert len(levelled(wave, window=0.5)) == len(wave)
+
+
 def test_of_the_second_look_only_words_in_the_silence_of_the_first_are_kept():
     [found] = phrases_of_chunk(
         [("Центр", 0.0, 0.3), ("иммунологии.", 0.35, 0.9), ("Здравствуйте,", 1.0, 1.5), ("девушка", 1.55, 1.9)],

@@ -122,7 +122,8 @@ def levelled(
         return waveform
     frames = np.pad(waveform, (0, (-len(waveform)) % size)).reshape(-1, size)
     rms = np.sqrt((frames**2).mean(axis=1)) + 1e-6
-    gain = np.convolve(np.minimum(target / rms, ceiling), np.ones(3) / 3, mode="same")
+    # Zero-padded "valid" gives one gain per window; mode="same" returns 3 for fewer than 3 windows.
+    gain = np.convolve(np.pad(np.minimum(target / rms, ceiling), 1), np.ones(3) / 3, mode="valid")
     return np.clip(frames * gain[:, None], -1.0, 1.0).reshape(-1)[: len(waveform)].astype(np.float32)
 
 
